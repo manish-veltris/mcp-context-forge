@@ -643,7 +643,7 @@ describe("editResource - extended", () => {
     document.body.appendChild(form);
 
     ["edit-resource-name", "edit-resource-uri", "edit-resource-description",
-     "edit-resource-mime-type", "edit-resource-tags"].forEach((id) => {
+      "edit-resource-mime-type", "edit-resource-tags"].forEach((id) => {
       const input = document.createElement("input");
       input.id = id;
       document.body.appendChild(input);

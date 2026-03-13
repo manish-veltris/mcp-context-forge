@@ -393,22 +393,22 @@ describe("ALLOW_PUBLIC_VISIBILITY flag", () => {
     setTeamId("team-abc");
     flagWin.Admin.updateDefaultVisibility();
 
-        expect(flagDoc.getElementById("server-visibility-public").disabled).toBe(true);
-    });
+    expect(flagDoc.getElementById("server-visibility-public").disabled).toBe(true);
+  });
 
-    test("public radio becomes disabled even when initially checked in team scope", () => {
-        buildVisibilityRadios("server");
-        const publicRadio = flagDoc.getElementById("server-visibility-public");
-        publicRadio.checked = true;
-        publicRadio.defaultChecked = true;
-        setTeamId("team-abc");
+  test("public radio becomes disabled even when initially checked in team scope", () => {
+    buildVisibilityRadios("server");
+    const publicRadio = flagDoc.getElementById("server-visibility-public");
+    publicRadio.checked = true;
+    publicRadio.defaultChecked = true;
+    setTeamId("team-abc");
 
-        flagWin.updateDefaultVisibility();
+    flagWin.updateDefaultVisibility();
 
-        expect(publicRadio.checked).toBe(false);
-        expect(publicRadio.disabled).toBe(true);
-        expect(flagDoc.getElementById("server-visibility-team").checked).toBe(true);
-    });
+    expect(publicRadio.checked).toBe(false);
+    expect(publicRadio.disabled).toBe(true);
+    expect(flagDoc.getElementById("server-visibility-team").checked).toBe(true);
+  });
 
   test("disabled public radio gets opacity and line-through styling", () => {
     buildVisibilityRadios("tool");

@@ -735,7 +735,7 @@ describe("pagination loadPage swapStyle (#3396)", () => {
       hasNext: true,
       hasPrev: false,
       targetSelector: "#tools-table",
-      swapStyle: swapStyle,
+      swapStyle,
       tableName: "tools",
       baseUrl: "/admin/tools/partial",
       $el: {

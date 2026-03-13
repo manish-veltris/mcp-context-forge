@@ -66,7 +66,7 @@ export function loadAdminJs(options = {}) {
 
   // Execute the instrumented script in JSDOM's sandbox — safe eval of our
   // own source file, required because admin.js is not an ES module.
-  dom.window.eval(instrumentedCode); // eslint-disable-line no-eval
+  dom.window.eval(instrumentedCode);  
   return dom.window;
 }
 

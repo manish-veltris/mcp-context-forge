@@ -9,20 +9,6 @@
 
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
-// Mock tokens.js so fetchWithAuth can be inspected in runGlobalSearch tests.
-// This also prevents real fetch calls from being made.
-vi.mock("../../mcpgateway/admin_ui/tokens.js", () => ({
-  fetchWithAuth: vi.fn(),
-  performTokenSearch: vi.fn(),
-  getAuthToken: vi.fn(),
-  getTeamNameById: vi.fn(),
-  setupCreateTokenForm: vi.fn(),
-  setupTokenListEventHandlers: vi.fn(),
-  updateTeamScopingWarning: vi.fn(),
-  loadTokensList: vi.fn(),
-  debouncedServerSideTokenSearch: vi.fn(),
-}));
-
 import {
   getDefaultTabName,
   getUiHiddenSections,
@@ -40,6 +26,20 @@ import {
   runGlobalSearch,
 } from "../../mcpgateway/admin_ui/search.js";
 import { fetchWithAuth } from "../../mcpgateway/admin_ui/tokens.js";
+
+// Mock tokens.js so fetchWithAuth can be inspected in runGlobalSearch tests.
+// This also prevents real fetch calls from being made.
+vi.mock("../../mcpgateway/admin_ui/tokens.js", () => ({
+  fetchWithAuth: vi.fn(),
+  performTokenSearch: vi.fn(),
+  getAuthToken: vi.fn(),
+  getTeamNameById: vi.fn(),
+  setupCreateTokenForm: vi.fn(),
+  setupTokenListEventHandlers: vi.fn(),
+  updateTeamScopingWarning: vi.fn(),
+  loadTokensList: vi.fn(),
+  debouncedServerSideTokenSearch: vi.fn(),
+}));
 
 // ---------------------------------------------------------------------------
 // DOM helper — mirrors the original createTab() helper

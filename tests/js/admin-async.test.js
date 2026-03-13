@@ -309,32 +309,32 @@ describe("getAuthToken", () => {
 // getAuthHeaders — local helper that mirrors admin.js behaviour
 // ---------------------------------------------------------------------------
 async function getAuthHeaders(includeContentType = false) {
-    const token = await getAuthToken();
-    const headers = {};
-    if (token) {
-        headers.Authorization = `Bearer ${token}`;
-    }
-    if (includeContentType) {
-        headers["Content-Type"] = "application/json";
-    }
-    return headers;
+  const token = await getAuthToken();
+  const headers = {};
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  if (includeContentType) {
+    headers["Content-Type"] = "application/json";
+  }
+  return headers;
 }
 
 describe("getAuthHeaders", () => {
-    test("includes Authorization and JSON content type when token exists", async () => {
-        document.cookie = "jwt_token=test-token-123";
-        const headers = await getAuthHeaders(true);
-        expect(headers.Authorization).toBe("Bearer test-token-123");
-        expect(headers["Content-Type"]).toBe("application/json");
-    });
+  test("includes Authorization and JSON content type when token exists", async () => {
+    document.cookie = "jwt_token=test-token-123";
+    const headers = await getAuthHeaders(true);
+    expect(headers.Authorization).toBe("Bearer test-token-123");
+    expect(headers["Content-Type"]).toBe("application/json");
+  });
 
-    test("omits Authorization when token is unavailable", async () => {
-        document.cookie = "jwt_token=; expires=Thu, 01 Jan 1970 00:00:00 GMT";
-        document.cookie = "token=; expires=Thu, 01 Jan 1970 00:00:00 GMT";
-        const headers = await getAuthHeaders(true);
-        expect(headers.Authorization).toBeUndefined();
-        expect(headers["Content-Type"]).toBe("application/json");
-    });
+  test("omits Authorization when token is unavailable", async () => {
+    document.cookie = "jwt_token=; expires=Thu, 01 Jan 1970 00:00:00 GMT";
+    document.cookie = "token=; expires=Thu, 01 Jan 1970 00:00:00 GMT";
+    const headers = await getAuthHeaders(true);
+    expect(headers.Authorization).toBeUndefined();
+    expect(headers["Content-Type"]).toBe("application/json");
+  });
 });
 
 // ---------------------------------------------------------------------------

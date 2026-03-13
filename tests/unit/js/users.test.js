@@ -15,6 +15,11 @@ import {
 } from "../../../mcpgateway/admin_ui/users.js";
 import { fetchWithAuth } from "../../../mcpgateway/admin_ui/tokens.js";
 
+// ---------------------------------------------------------------------------
+// showUserEditModal - NEW TESTS
+// ---------------------------------------------------------------------------
+import { showUserEditModal, formatDate } from "../../../mcpgateway/admin_ui/users.js";
+
 // Mock dependencies
 vi.mock("../../../mcpgateway/admin_ui/security.js", () => ({
   escapeHtml: vi.fn((s) => (s != null ? String(s) : "")),
@@ -257,11 +262,6 @@ describe("initializePermissionsPanel", () => {
     expect(() => initializePermissionsPanel()).not.toThrow();
   });
 });
-
-// ---------------------------------------------------------------------------
-// showUserEditModal - NEW TESTS
-// ---------------------------------------------------------------------------
-import { showUserEditModal, formatDate } from "../../../mcpgateway/admin_ui/users.js";
 
 describe("showUserEditModal", () => {
   beforeEach(() => {

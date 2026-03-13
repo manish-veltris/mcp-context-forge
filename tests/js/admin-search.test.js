@@ -6,6 +6,23 @@
 
 import { describe, test, expect, beforeEach, vi } from "vitest";
 
+import {
+  clearSearch,
+  openGlobalSearchModal,
+  closeGlobalSearchModal,
+  navigateToGlobalSearchResult,
+} from "../../mcpgateway/admin_ui/search.js";
+import { showUserEditModal } from "../../mcpgateway/admin_ui/users.js";
+import {
+  filterServerTable,
+  filterToolsTable,
+} from "../../mcpgateway/admin_ui/filters.js";
+import { showTab } from "../../mcpgateway/admin_ui/tabs.js";
+import {
+  fetchWithAuth,
+  performTokenSearch,
+} from "../../mcpgateway/admin_ui/tokens.js";
+
 // ---------------------------------------------------------------------------
 // Mock heavy / circular dependency chains before importing modules under test.
 // ---------------------------------------------------------------------------
@@ -57,23 +74,6 @@ vi.mock("../../mcpgateway/admin_ui/teams.js", () => ({
   validatePasswordMatch: vi.fn(),
   validatePasswordRequirements: vi.fn(),
 }));
-
-import {
-  clearSearch,
-  openGlobalSearchModal,
-  closeGlobalSearchModal,
-  navigateToGlobalSearchResult,
-} from "../../mcpgateway/admin_ui/search.js";
-import { showUserEditModal } from "../../mcpgateway/admin_ui/users.js";
-import {
-  filterServerTable,
-  filterToolsTable,
-} from "../../mcpgateway/admin_ui/filters.js";
-import { showTab } from "../../mcpgateway/admin_ui/tabs.js";
-import {
-  fetchWithAuth,
-  performTokenSearch,
-} from "../../mcpgateway/admin_ui/tokens.js";
 
 beforeEach(() => {
   document.body.innerHTML = "";
