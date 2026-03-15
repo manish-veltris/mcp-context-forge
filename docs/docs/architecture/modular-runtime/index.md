@@ -7,6 +7,7 @@ build a protocol module in Rust, Go, or Python.
 The intent is not to freeze every future protobuf field today. The intent is
 to define the minimum contract surface clearly enough that:
 
+- the existing Rust MCP module can be understood as the reference implementation
 - a Rust A2A module can be implemented without re-designing the trust model
 - a Go LLM proxy module can be implemented without guessing where policy lives
 - a REST or gRPC module can be implemented without inventing a different
@@ -20,6 +21,10 @@ to define the minimum contract surface clearly enough that:
 4. [Error Model](error-model.md)
 5. [Conformance](conformance.md)
 6. the protocol profile that matches the module being implemented
+   - [MCP Module Profile](mcp-module.md)
+   - [A2A Module Profile](a2a-module.md)
+   - [LLM Module Profile](llm-module.md)
+   - [REST/gRPC Module Profile](rest-grpc-module.md)
 
 ## Contract Status
 
@@ -50,3 +55,12 @@ That precedent proves:
 It does **not** mean that every future module must copy the exact current Rust
 MCP seam. The target-state contracts in this section are slightly more generic
 than the current implementation.
+
+## Status by Protocol Family
+
+| Protocol family | Status |
+|-----------------|--------|
+| MCP | Implemented as a Rust sidecar/runtime path |
+| A2A | Planned against this spec |
+| LLM | Planned against this spec |
+| REST/gRPC | Planned against this spec |

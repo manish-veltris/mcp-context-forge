@@ -82,6 +82,7 @@ Use the documents in this order:
    [Conformance](modular-runtime/conformance.md) for compatibility and release
    requirements
 5. the protocol profile for the module being implemented:
+   - [MCP Module Profile](modular-runtime/mcp-module.md)
    - [A2A Module Profile](modular-runtime/a2a-module.md)
    - [LLM Module Profile](modular-runtime/llm-module.md)
    - [REST/gRPC Module Profile](modular-runtime/rest-grpc-module.md)
@@ -121,6 +122,21 @@ In particular, the current Rust MCP runtime is a **transition architecture**:
 This document defines the steadier target boundary that future modules should
 converge on.
 
+## Implementation Status
+
+The modular architecture is no longer purely speculative. One protocol module
+is already implemented and validated.
+
+| Protocol family | Module status | Notes |
+|-----------------|---------------|-------|
+| MCP | Implemented | Rust MCP runtime sidecar exists today with mode-based rollout and direct-ingress support |
+| A2A | Not yet extracted | Current A2A runtime remains embedded in Python |
+| LLM | Not yet extracted | Current LLM proxy and chat flows remain embedded in Python |
+| REST/gRPC | Not yet extracted | Current virtualization and service-management flows remain embedded in Python |
+
+The important consequence is that this spec is grounded in a working MCP module
+rather than a hypothetical first extraction.
+
 ## Current Precedent vs Target State
 
 The spec must be explicit about what is implemented today versus what future
@@ -128,7 +144,7 @@ modules should target.
 
 | Topic | Implemented today | Target-state default |
 |-------|-------------------|----------------------|
-| First extracted runtime | Rust MCP sidecar | More protocol modules, potentially in Rust, Go, or Python |
+| First extracted runtime | Rust MCP sidecar | Additional protocol modules, potentially in Rust, Go, or Python |
 | Sidecar transport to core | Narrow internal HTTP over local/private transport, including UDS or loopback depending on path | gRPC over UDS |
 | Fallback transport | HTTP/JSON | HTTP/JSON |
 | Ingress ownership | Both valid today: Python-owned ingress and direct Rust ingress depending on mode | Both valid patterns remain acceptable |
