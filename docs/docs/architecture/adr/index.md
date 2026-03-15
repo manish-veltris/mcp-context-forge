@@ -46,5 +46,9 @@ This page tracks all significant design decisions made for ContextForge project,
 | 0041  | Top-Level Rust Workspace (Cargo.toml at Repository Root) | Accepted | Architecture | 2026-02-26 |
 | 0042  | Enforce Rust in the Build Process                    | Proposed | Build         | 2026-02-26 |
 | 0043  | Rust MCP Runtime Sidecar with Mode-Based Rollout     | Accepted | Architecture  | 2026-03-14 |
+| 0044  | Module Communication Protocol (gRPC over UDS)        | Proposed | Architecture  | 2026-03-15 |
+| 0045  | Authentication and Authorization Remain in Core      | Proposed | Security      | 2026-03-15 |
+| 0046  | Shared-Nothing Between Protocol Modules              | Proposed | Architecture  | 2026-03-15 |
+| 0047  | Incremental Migration Over Rewrite                   | Proposed | Architecture  | 2026-03-15 |
 
 > ✳️ Add new decisions chronologically and link to them from this table.

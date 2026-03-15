@@ -527,6 +527,126 @@ Recommended next step:
   should consume a revocation/invalidation signal from Python to drop cached
   auth state immediately.
 
+#### 20. Legacy migration suites are still red
+
+Status:
+- Deferred broader release/upgrade follow-up
+
+Observed behavior:
+- `make migration-test-sqlite` is still not release-clean:
+  - `7 failed, 3 passed`
+  - failures show post-upgrade data loss across `0.5.0/0.6.0/latest` paths
+- `make migration-test-postgres` now gets past the earlier harness issues, but
+  still fails on real legacy startup/migration behavior:
+  - the `0.5.0` image cannot locate Alembic revision `1fc1795f6983`
+
+Why this matters:
+- These are real release-upgrade concerns, but they are not Rust-runtime
+  transport regressions.
+- They affect broader product upgrade confidence across older versions.
+
+Likely area:
+- `tests/migration/*`
+- legacy image migration chains
+- historical Alembic revision continuity
+
+Recommended next step:
+- Treat the migration failures as a separate upgrade-hardening track.
+- Decide which historical upgrade paths must be supported for the release, then
+  fix the legacy migration/data-retention issues independently of the Rust MCP
+  transport PR.
+
+#### 21. Live PostgreSQL TLS validation is still unexecuted
+
+Status:
+- Deferred release-validation follow-up
+
+Observed behavior:
+- Rust PostgreSQL TLS support was implemented and local non-TLS compose runs
+  are green.
+- Python already supports PostgreSQL TLS via libpq/SQLAlchemy URL parameters.
+- This checklist pass did not run against a live PostgreSQL deployment that
+  actually requires TLS.
+
+Why this matters:
+- The feature exists, but local release validation still lacks a true
+  end-to-end TLS-required database exercise for both Python and Rust paths.
+
+Likely area:
+- deployment-specific validation environment
+- Rust database startup/config path in `tools_rust/mcp_runtime/src/lib.rs`
+
+Recommended next step:
+- Provision a TLS-required PostgreSQL target and validate:
+  - Python with `DATABASE_URL=...?...sslmode=require`
+  - Rust with `MCP_RUST_DATABASE_URL=...?...sslmode=require`
+  - Rust with `sslmode=prefer`
+  - Rust with `sslrootcert=/path/to/ca.pem`
+  - explicit failure for unsupported `sslcert` / `sslkey`
+
+#### 22. Minikube clean reinstall flow still looks unhealthy
+
+Status:
+- Deferred Helm/deployment follow-up
+
+Observed behavior:
+- The Minikube validation pass successfully deployed and served traffic.
+- However, the explicit empty-namespace reinstall flow was not release-clean:
+  - resources were created in the fresh namespace
+  - `helm list` remained empty
+  - the namespace had to be deleted again to avoid leaving orphaned resources
+
+Why this matters:
+- This is a deployment/release-process problem, not a Rust transport bug.
+- It affects confidence in Helm reinstall semantics and cleanup behavior.
+
+Likely area:
+- Helm release lifecycle around `charts/mcp-stack`
+- local Minikube/Helm state handling
+- install/upgrade wrapper behavior in the `Makefile`
+
+Recommended next step:
+- Reproduce the clean reinstall flow in isolation and determine whether the
+  issue is in Helm invocation, namespace lifecycle timing, or local Minikube
+  state.
+
+#### 23. Optional `2025-11-25-report` surface is not release-clean
+
+Status:
+- Deferred protocol-surface follow-up
+
+Observed behavior:
+- `make 2025-11-25-core` and `make 2025-11-25-auth` are green on the settled
+  full-Rust stack.
+- The broader optional report target is still red:
+  - `9 failed, 44 passed, 2 skipped`
+- Remaining failing live methods were:
+  - `completion/complete`
+  - `prompts/get`
+  - `resources/read`
+  - `resources/subscribe`
+  - `sampling/createMessage`
+  - `tasks/list|get|result|cancel`
+
+Why this matters:
+- This is a broader MCP optional-surface compliance issue, not a core Rust MCP
+  transport failure.
+- Some of these may be true product gaps, while others may be generic sample
+  data / expectation mismatches in the compliance harness.
+
+Likely area:
+- `tests/compliance/mcp_2025_11_25/*`
+- optional MCP method behavior and error-shape expectations
+- server-specific sample-data assumptions for prompts/resources/completion
+
+Recommended next step:
+- Triage each failing optional method and separate:
+  - harness/sample-data assumptions
+  - expected product limitations
+  - true protocol/error-shape defects
+- Only then decide whether to expand the release gate beyond `core` and
+  `auth`.
+
 ## Not In Scope Here
 
 These items are not currently believed to be blocking the main Rust MCP runtime work:

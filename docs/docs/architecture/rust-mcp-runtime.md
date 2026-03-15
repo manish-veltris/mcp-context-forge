@@ -5,6 +5,13 @@ streamable HTTP MCP traffic. It is designed to move the public MCP hot path out
 of Python incrementally while keeping Python authoritative for authentication,
 token scoping, and RBAC.
 
+It is also the first concrete precedent for the broader
+[Modular Runtime Architecture](modular-design.md): a protocol-specific runtime
+that can move out of the Python process while the core platform remains the
+shared policy and control plane. The generalized implementor-facing contract
+for future modules is documented in the
+[Modular Runtime Specification](modular-runtime/index.md).
+
 This page describes the current architecture and the supported rollout modes.
 
 ## Mode Model
