@@ -3287,6 +3287,18 @@ export const runToolTest = async function () {
             if (prop.enum.includes(value)) {
               params[keyValidation.value] = value;
             }
+          } else if (prop.type === "object") {
+            try {
+              const parsed = JSON.parse(value);
+              if (typeof parsed !== "object" || Array.isArray(parsed) || parsed === null) {
+                throw new Error("Value must be an object");
+              }
+              params[keyValidation.value] = parsed;
+            } catch (error) {
+              console.error(`Error parsing object value for ${key}:`, error);
+              showErrorMessage(`Invalid JSON object format for ${key}`);
+              throw error;
+            }
           } else {
             params[keyValidation.value] = value;
           }
