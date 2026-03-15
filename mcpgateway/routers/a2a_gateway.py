@@ -2,7 +2,7 @@
 """Location: ./mcpgateway/routers/a2a_gateway.py
 Copyright 2025
 SPDX-License-Identifier: Apache-2.0
-Authors: Keval Mahajan 
+Authors: Keval Mahajan
 
 A2A Gateway Router
 
