@@ -36,21 +36,40 @@ export const handleToggleSubmit = async function (event, type) {
       credentials: "include",
       redirect: "manual",
     });
+
+    // Use HTMX to refresh the table instead of full page reload
+    const fragment = AppState._TOGGLE_FRAGMENT_MAP[type] || type;
+    const params = new URLSearchParams();
+    if (isInactiveCheckedBool) {
+      params.set("include_inactive", "true");
+    }
+    if (teamId) {
+      params.set("team_id", teamId);
+    }
+
+    // Trigger HTMX request to refresh the table
+    const tableId = `${type}-table`;
+    const partialUrl = `${window.ROOT_PATH}/admin/${type}/partial?${params.toString()}`;
+    
+    if (window.htmx) {
+      htmx.ajax('GET', partialUrl, {
+        target: `#${tableId}`,
+        swap: 'outerHTML'
+      });
+    } else {
+      // Fallback to full reload if HTMX not available
+      navigateAdmin(fragment, params);
+    }
   } catch (e) {
     // Network error — still navigate so the user sees refreshed state.
     console.error("Toggle submit error:", e);
+    const fragment = AppState._TOGGLE_FRAGMENT_MAP[type] || type;
+    const params = new URLSearchParams();
+    if (teamId) {
+      params.set("team_id", teamId);
+    }
+    navigateAdmin(fragment, params);
   }
-
-  // Navigate using proxy-aware helper so proxy prefix is preserved.
-  const fragment = AppState._TOGGLE_FRAGMENT_MAP[type] || type;
-  const params = new URLSearchParams();
-  if (isInactiveCheckedBool) {
-    params.set("include_inactive", "true");
-  }
-  if (teamId) {
-    params.set("team_id", teamId);
-  }
-  navigateAdmin(fragment, params);
 };
 
 export const handleSubmitWithConfirmation = function (event, type) {

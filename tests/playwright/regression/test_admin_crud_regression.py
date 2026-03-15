@@ -202,10 +202,16 @@ class TestVirtualServerCRUD:
 
         # Step 4: Wait for edit modal and modify server name
         edit_modal = admin_page.locator('#server-edit-modal')
-        edit_modal.wait_for(state="visible", timeout=5_000)
+        edit_modal.wait_for(state="visible", timeout=10_000)
 
         modal_name_input = edit_modal.locator('input[name="name"]')
         expect(modal_name_input).to_be_visible(timeout=5_000)
+
+        # Wait for editServer() async API call to complete and populate the name field
+        admin_page.wait_for_function(
+            "() => { const f = document.querySelector('#edit-server-name'); return f && f.value !== ''; }",
+            timeout=10_000,
+        )
 
         # Get current name from modal input and update it
         original_name = modal_name_input.input_value()
@@ -218,8 +224,10 @@ class TestVirtualServerCRUD:
         save_button.click()
 
         # Step 6: Verify changes persisted (search to handle pagination)
-        admin_page.wait_for_timeout(2_000)
+        # Wait for modal to close before interacting with the table
+        edit_modal.wait_for(state="hidden", timeout=10_000)
         search_box = admin_page.locator('#catalog-panel input[type="text"][placeholder*="Search" i]').first
+        expect(search_box).to_be_visible(timeout=5_000)
         search_box.fill(updated_name)
         updated_cell = admin_page.locator(f'#catalog-panel td:has-text("{updated_name}")')
         expect(updated_cell.first).to_be_visible(timeout=10_000)
@@ -279,16 +287,25 @@ class TestVirtualServerCRUD:
 
             submit_button = admin_page.locator('#catalog-panel button[type="submit"]:has-text("Add Server"):visible').first
             expect(submit_button).to_be_visible(timeout=5_000)
-            submit_button.click()
 
-            # Wait for server creation and reload servers tab
-            admin_page.wait_for_timeout(2_000)
-            servers_tab.click()
+            # handleServerFormSubmit calls navigateAdmin("catalog") on success,
+            # which triggers a full page navigation.  Wait for it to complete
+            # (wait_until="load" ensures Alpine.js and HTMX have initialised).
+            with admin_page.expect_navigation(wait_until="load", timeout=15_000):
+                submit_button.click()
+
+            # The page reloaded to #catalog; HTMX loads the servers partial
+            # automatically — no need to click the tab again (doing so can
+            # trigger a second HTMX request that races with the first).
+            # Wait for the newly-created server's row specifically: this
+            # confirms the partial has fully rendered and the correct row
+            # (with an interactive delete button) is in the DOM.
             admin_page.wait_for_selector("#servers-table-body", state="attached", timeout=10_000)
-            admin_page.wait_for_timeout(1_000)
+            server_row = admin_page.locator(f'#servers-table-body tr:has(td:has-text("{server_name}"))')
+            expect(server_row).to_be_visible(timeout=10_000)
 
-            # Now find the delete button again
-            delete_button = admin_page.locator('#catalog-panel button[type="submit"]:has-text("Delete"):visible').first
+            # Scope delete button to this row to avoid matching stale elements
+            delete_button = server_row.locator('button[type="submit"]:has-text("Delete")')
             expect(delete_button).to_be_visible(timeout=5_000)
 
         initial_count = server_rows.count()
@@ -298,22 +315,22 @@ class TestVirtualServerCRUD:
         # handleToggleSubmit does fetch(redirect:'manual') followed by
         # navigateAdmin() which reloads the page via location change.
         admin_page.on("dialog", lambda d: d.accept())
-        delete_button.click()
+        
+        # Wait for HTMX to refresh the table after deletion
+        # The new implementation uses htmx.ajax() instead of full page reload
+        with admin_page.expect_response(
+            lambda r: "/admin/servers/partial" in r.url and r.status == 200,
+            timeout=10_000
+        ):
+            delete_button.click()
 
-        # Step 5: Wait for the async fetch to complete, then force a
-        # clean page reload.  The JS navigateAdmin triggers a page
-        # reload, but it may race with HTMX partial rendering and
-        # produce stale counts.  Waiting briefly for the fetch, then
-        # performing an explicit reload guarantees fresh server-side
-        # data in the DOM.
-        admin_page.wait_for_timeout(3_000)
-        admin_page.reload(wait_until="domcontentloaded")
-        servers_tab = admin_page.locator('[data-testid="servers-tab"]')
-        expect(servers_tab).to_be_visible(timeout=10_000)
-        servers_tab.click()
+        # Step 5: Wait for HTMX partial to finish rendering
         admin_page.wait_for_selector("#servers-table-body", state="attached", timeout=10_000)
-        admin_page.wait_for_timeout(1_000)
-        expect(server_rows).to_have_count(initial_count - 1, timeout=15_000)
+        admin_page.wait_for_timeout(1_000)  # Allow HTMX to settle
+
+        # Verify deletion succeeded - use fresh locator after HTMX swap
+        server_rows = admin_page.locator('#servers-table-body [data-testid="server-item"]')
+        expect(server_rows).to_have_count(initial_count - 1, timeout=10_000)
 
         # Step 6 & 7: Verify no errors
         js_errors = _filter_benign_errors(error_collector["js_errors"])

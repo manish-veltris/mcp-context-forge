@@ -351,7 +351,7 @@ export const handleEditPromptFormSubmit = async function (e) {
       searchParams.set("team_id", teamId);
     }
 
-    navigateAdmin("gateways", searchParams);
+    navigateAdmin("prompts", searchParams);
 
   } catch (error) {
     console.error("Error:", error);
@@ -582,7 +582,7 @@ export const handleA2AFormSubmit = async function (e) {
         searchParams.set("team_id", teamId);
       }
 
-      navigateAdmin("gateways", searchParams);
+      navigateAdmin("a2a-agents", searchParams);
 
     }
   } catch (error) {
@@ -741,7 +741,7 @@ export const handleEditToolFormSubmit = async function (event) {
         searchParams.set("team_id", teamId);
       }
 
-      navigateAdmin("gateways", searchParams);
+      navigateAdmin("tools", searchParams);
 
     }
   } catch (error) {
@@ -927,7 +927,7 @@ export const handleEditA2AAgentFormSubmit = async function (e) {
       searchParams.set("team_id", teamId);
     }
 
-    navigateAdmin("gateways", searchParams);
+    navigateAdmin("a2a-agents", searchParams);
 
   } catch (error) {
     console.error("Error:", error);
@@ -1019,7 +1019,7 @@ export const handleEditServerFormSubmit = async function (e) {
         searchParams.set("team_id", teamId);
       }
 
-      navigateAdmin("gateways", searchParams);
+      navigateAdmin("catalog", searchParams); // Virtual Servers tab
 
     }
   } catch (error) {
@@ -1094,7 +1094,7 @@ export const handleEditResFormSubmit = async function (e) {
         searchParams.set("team_id", teamId);
       }
 
-      navigateAdmin("gateways", searchParams);
+      navigateAdmin("resources", searchParams);
 
     }
   } catch (error) {
@@ -1189,7 +1189,7 @@ export const handleGrpcServiceFormSubmit = async function (e) {
       searchParams.set("team_id", teamId);
     }
 
-    navigateAdmin("gateways", searchParams);
+    navigateAdmin("grpc-services", searchParams);
 
   } catch (error) {
     console.error("Add gRPC Service Error:", error);
