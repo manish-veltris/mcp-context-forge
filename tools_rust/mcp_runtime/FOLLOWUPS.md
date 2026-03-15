@@ -259,6 +259,31 @@ Observed behavior:
 Why this matters:
 - Compose test ergonomics and fixture predictability.
 
+### 11. Remaining Rust runtime test-hardening lanes from `todo/test-improvement.md`
+
+Status:
+- Deferred on purpose from this PR
+
+What is already covered now:
+- SSE parser helper edge cases in Rust unit tests
+- representative specialized-endpoint success/error JSON-RPC envelope coverage
+- explicit `elicitation/create` forwarded-path coverage
+- direct `tools/call` upstream-session retry after cached-session failure
+
+Still deferred:
+- concurrent direct `tools/call` contention on the shared upstream-session key
+- direct public-listener end-to-end coverage against the real Python auth backend
+- full resumable GET lifecycle in one end-to-end flow
+- multi-worker isolation/load against 2+ Rust runtime instances behind nginx
+
+Why this matters:
+- These are still useful confidence layers, but they are either timing-sensitive
+  or require broader compose/test-infra changes that would widen this PR.
+
+Recommended next step:
+- Take these as the next Rust-runtime test-focused PR once the current branch is
+  merged or otherwise stabilized.
+
 Recommended next step:
 - Inspect server sync timing and transport filtering on the SSE registration path separately from the `register_fast_time` auth/startup race that was already fixed.
 

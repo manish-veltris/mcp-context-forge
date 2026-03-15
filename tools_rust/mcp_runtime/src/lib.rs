@@ -7411,14 +7411,15 @@ mod unit_tests {
         TrustedPeerAddr, URL_SAFE_NO_PAD, accepts_sse, active_runtime_session_count,
         affinity_forward_error_response, auth_binding_fingerprint,
         authenticate_public_request_if_needed, authorize_server_method_via_backend,
-        batch_rejected_response, build_public_router, can_reuse_session_auth,
-        can_use_direct_prompts_get, can_use_direct_resources_read, decode_request,
-        derive_backend_authenticate_url, derive_backend_completion_complete_url,
-        derive_backend_initialize_url, derive_backend_logging_set_level_url,
-        derive_backend_notifications_cancelled_url, derive_backend_notifications_initialized_url,
-        derive_backend_notifications_message_url, derive_backend_prompts_get_authz_url,
-        derive_backend_prompts_get_url, derive_backend_prompts_list_authz_url,
-        derive_backend_prompts_list_url, derive_backend_resource_templates_list_authz_url,
+        batch_rejected_response, build_forwarded_sse_event, build_public_router,
+        can_reuse_session_auth, can_use_direct_prompts_get, can_use_direct_resources_read,
+        decode_request, decode_upstream_json_payload_bytes, derive_backend_authenticate_url,
+        derive_backend_completion_complete_url, derive_backend_initialize_url,
+        derive_backend_logging_set_level_url, derive_backend_notifications_cancelled_url,
+        derive_backend_notifications_initialized_url, derive_backend_notifications_message_url,
+        derive_backend_prompts_get_authz_url, derive_backend_prompts_get_url,
+        derive_backend_prompts_list_authz_url, derive_backend_prompts_list_url,
+        derive_backend_resource_templates_list_authz_url,
         derive_backend_resource_templates_list_url, derive_backend_resources_list_authz_url,
         derive_backend_resources_list_url, derive_backend_resources_read_authz_url,
         derive_backend_resources_read_url, derive_backend_resources_subscribe_url,
@@ -7429,14 +7430,14 @@ mod unit_tests {
         derive_backend_transport_url, direct_server_prompts_get, direct_server_prompts_list,
         direct_server_resource_templates_list, direct_server_resources_list,
         direct_server_resources_read, encode_internal_auth_context_header, event_store_key_prefix,
-        extract_client_capabilities, forward_initialize_to_backend, forward_to_backend,
-        forward_transport_request, get_runtime_session, handle_initialize_with_session_core,
-        handle_resume_transport_request, has_server_scope, hex_decode, hex_encode,
-        inject_server_id_header, inject_session_header, invalid_request_response,
-        is_affinity_forwarded_request, maybe_bind_session_auth_context,
+        extract_client_capabilities, extract_first_sse_data_payload, finalize_sse_frame,
+        forward_initialize_to_backend, forward_to_backend, forward_transport_request,
+        get_runtime_session, handle_initialize_with_session_core, handle_resume_transport_request,
+        has_server_scope, hex_decode, hex_encode, inject_server_id_header, inject_session_header,
+        invalid_request_response, is_affinity_forwarded_request, maybe_bind_session_auth_context,
         maybe_upsert_runtime_session_from_transport_response, normalize_postgres_database_url,
-        parse_error_response, pool_owner_key, prompt_arguments_from_schema, public_client_ip,
-        query_param, remove_runtime_session, replay_events_endpoint,
+        parse_error_response, parse_sse_line, pool_owner_key, prompt_arguments_from_schema,
+        public_client_ip, query_param, remove_runtime_session, replay_events_endpoint,
         requested_initialize_session_id, requested_protocol_version,
         response_from_affinity_forward_response, run, runtime_session_access_outcome,
         runtime_session_id_from_request, runtime_session_key, send_tools_list_to_backend,
@@ -7449,12 +7450,14 @@ mod unit_tests {
         body::to_bytes,
         extract::{Path as AxumPath, State},
         http::{HeaderMap, HeaderName, HeaderValue, StatusCode, Uri},
-        response::Response,
+        response::{IntoResponse, Response, sse::Sse},
         routing::{get, post},
     };
+    use futures_util::stream;
     use reqwest::Url;
     use serde_json::{Value, json};
     use std::{
+        convert::Infallible,
         net::{SocketAddr, TcpListener},
         path::PathBuf,
         sync::{Arc, Mutex},
@@ -8571,6 +8574,111 @@ mod unit_tests {
             StatusCode::BAD_REQUEST
         );
         assert_eq!(batch_rejected_response().status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn sse_parser_helpers_cover_spec_edge_cases() {
+        let mut frame = super::PendingSseFrame::default();
+        parse_sse_line(&mut frame, ": keepalive");
+        assert!(!frame.saw_field);
+
+        parse_sse_line(&mut frame, "data: hello");
+        parse_sse_line(&mut frame, "data:world");
+        parse_sse_line(&mut frame, "id: event-1");
+        parse_sse_line(&mut frame, "event: message");
+        parse_sse_line(&mut frame, "retry: 1500");
+        parse_sse_line(&mut frame, "foo: bar");
+        let finalized = finalize_sse_frame(&mut frame).expect("frame should finalize");
+        assert_eq!(finalized.id.as_deref(), Some("event-1"));
+        assert_eq!(finalized.event.as_deref(), Some("message"));
+        assert_eq!(finalized.data, "hello\nworld");
+        assert_eq!(finalized.retry_ms, Some(1500));
+
+        let mut invalid_retry = super::PendingSseFrame::default();
+        parse_sse_line(&mut invalid_retry, "retry: nope");
+        parse_sse_line(&mut invalid_retry, "data: payload");
+        let invalid_retry = finalize_sse_frame(&mut invalid_retry).expect("invalid retry frame");
+        assert_eq!(invalid_retry.retry_ms, None);
+        assert_eq!(invalid_retry.data, "payload");
+
+        let mut no_colon_frame = super::PendingSseFrame::default();
+        parse_sse_line(&mut no_colon_frame, "data");
+        let no_colon = finalize_sse_frame(&mut no_colon_frame).expect("empty data field");
+        assert_eq!(no_colon.data, "");
+
+        let mut comments_only = super::PendingSseFrame::default();
+        parse_sse_line(&mut comments_only, ": still ignored");
+        assert!(finalize_sse_frame(&mut comments_only).is_none());
+
+        let mut empty = super::PendingSseFrame::default();
+        assert!(finalize_sse_frame(&mut empty).is_none());
+    }
+
+    #[tokio::test]
+    async fn build_forwarded_sse_event_and_payload_decoders_cover_edge_cases() {
+        let frame = super::FinalizedSseFrame {
+            id: Some("event-7".to_string()),
+            event: Some("message".to_string()),
+            data: "line one\nline two".to_string(),
+            retry_ms: Some(2500),
+        };
+        let response = Sse::new(stream::iter(vec![Ok::<_, Infallible>(
+            build_forwarded_sse_event(&frame),
+        )]))
+        .into_response();
+        let encoded = String::from_utf8(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("encoded event body")
+                .to_vec(),
+        )
+        .expect("utf-8 body");
+        assert!(encoded.contains("id: event-7"));
+        assert!(encoded.contains("event: message"));
+        assert!(encoded.contains("retry: 2500"));
+        assert!(encoded.contains("data: line one"));
+        assert!(encoded.contains("data: line two"));
+
+        assert_eq!(
+            extract_first_sse_data_payload("data: first\n\ndata: second\n\n"),
+            Some("first".to_string())
+        );
+        assert_eq!(
+            extract_first_sse_data_payload("data: first\ndata: second"),
+            Some("first\nsecond".to_string())
+        );
+        assert_eq!(extract_first_sse_data_payload("event: message\n\n"), None);
+        assert_eq!(
+            extract_first_sse_data_payload("data:   padded value\n\n"),
+            Some("padded value".to_string())
+        );
+
+        let sse_json = decode_upstream_json_payload_bytes(
+            br#"data: {"ok":true}
+
+"#,
+            "text/event-stream",
+        )
+        .expect("valid SSE JSON");
+        assert_eq!(sse_json["ok"], json!(true));
+
+        let inferred_sse = decode_upstream_json_payload_bytes(br#"data: {"via":"prefix"}"#, "")
+            .expect("body prefix infers SSE");
+        assert_eq!(inferred_sse["via"], json!("prefix"));
+
+        let plain_json =
+            decode_upstream_json_payload_bytes(br#"{"plain":true}"#, "application/json")
+                .expect("plain JSON");
+        assert_eq!(plain_json["plain"], json!(true));
+
+        let invalid_sse =
+            decode_upstream_json_payload_bytes(b"data: not-json\n\n", "text/event-stream")
+                .expect_err("invalid SSE JSON should fail");
+        assert!(invalid_sse.contains("invalid SSE JSON payload"));
+
+        let empty_json = decode_upstream_json_payload_bytes(b"", "application/json")
+            .expect_err("empty JSON body should fail");
+        assert!(empty_json.contains("invalid JSON payload"));
     }
 
     #[test]

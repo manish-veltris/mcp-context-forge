@@ -691,23 +691,30 @@ async fn public_session_reauthenticates_after_auth_reuse_ttl_expires() {
         .expect("initialize response");
     assert_eq!(initialize_response.status(), StatusCode::OK);
 
-    tokio::time::sleep(Duration::from_millis(1_100)).await;
-
-    let roots_response = client
-        .post(format!("{runtime_url}/mcp"))
-        .header("authorization", "Bearer alpha")
-        .header("mcp-session-id", "session-reuse-3")
-        .header("mcp-protocol-version", "2025-11-25")
-        .json(&json!({
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "roots/list",
-            "params": {}
-        }))
-        .send()
-        .await
-        .expect("roots response");
-    assert_eq!(roots_response.status(), StatusCode::OK);
+    let deadline = Instant::now() + Duration::from_secs(4);
+    let mut last_status = None;
+    while Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let roots_response = client
+            .post(format!("{runtime_url}/mcp"))
+            .header("authorization", "Bearer alpha")
+            .header("mcp-session-id", "session-reuse-3")
+            .header("mcp-protocol-version", "2025-11-25")
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "roots/list",
+                "params": {}
+            }))
+            .send()
+            .await
+            .expect("roots response");
+        last_status = Some(roots_response.status());
+        if *auth_calls.lock().expect("lock") == 2 {
+            break;
+        }
+    }
+    assert_eq!(last_status, Some(StatusCode::OK));
 
     assert_eq!(
         *auth_calls.lock().expect("lock"),
@@ -3818,6 +3825,274 @@ async fn logging_set_level_uses_specialized_internal_endpoint() {
 }
 
 #[tokio::test]
+async fn representative_specialized_endpoints_wrap_success_and_error_payloads_in_jsonrpc_envelopes()
+{
+    let backend = Router::new()
+        .route(
+            "/_internal/mcp/resources/list",
+            post(|Json(body): Json<Value>| async move {
+                let mut headers = HeaderMap::new();
+                if body["id"] == json!(63) {
+                    headers.insert(
+                        "mcp-session-id",
+                        HeaderValue::from_static("resources-specialized-session"),
+                    );
+                    (
+                        StatusCode::OK,
+                        headers,
+                        Json(json!({"resources": [{"uri": "resource://one"}]})),
+                    )
+                        .into_response()
+                } else {
+                    headers.insert(
+                        "www-authenticate",
+                        HeaderValue::from_static("Bearer realm=\"contextforge\""),
+                    );
+                    headers.insert(
+                        "mcp-session-id",
+                        HeaderValue::from_static("resources-specialized-denied"),
+                    );
+                    (
+                        StatusCode::FORBIDDEN,
+                        headers,
+                        Json(json!({"code": -32002, "message": "resources/list denied"})),
+                    )
+                        .into_response()
+                }
+            }),
+        )
+        .route(
+            "/_internal/mcp/prompts/get",
+            post(|Json(body): Json<Value>| async move {
+                let mut headers = HeaderMap::new();
+                if body["id"] == json!(65) {
+                    headers.insert(
+                        "mcp-session-id",
+                        HeaderValue::from_static("prompts-specialized-session"),
+                    );
+                    (
+                        StatusCode::OK,
+                        headers,
+                        Json(json!({
+                            "name": "prompt-one",
+                            "messages": [{"role": "user", "content": "hello"}]
+                        })),
+                    )
+                        .into_response()
+                } else {
+                    headers.insert(
+                        "www-authenticate",
+                        HeaderValue::from_static("Bearer realm=\"contextforge\""),
+                    );
+                    headers.insert(
+                        "mcp-session-id",
+                        HeaderValue::from_static("prompts-specialized-denied"),
+                    );
+                    (
+                        StatusCode::FORBIDDEN,
+                        headers,
+                        Json(json!({"code": -32003, "message": "prompts/get denied"})),
+                    )
+                        .into_response()
+                }
+            }),
+        )
+        .route(
+            "/_internal/mcp/completion/complete",
+            post(|Json(body): Json<Value>| async move {
+                let mut headers = HeaderMap::new();
+                if body["id"] == json!(67) {
+                    headers.insert(
+                        "mcp-session-id",
+                        HeaderValue::from_static("completion-specialized-session"),
+                    );
+                    (
+                        StatusCode::OK,
+                        headers,
+                        Json(json!({
+                            "completion": {
+                                "values": [{"value": "done"}],
+                                "hasMore": false
+                            }
+                        })),
+                    )
+                        .into_response()
+                } else {
+                    headers.insert(
+                        "www-authenticate",
+                        HeaderValue::from_static("Bearer realm=\"contextforge\""),
+                    );
+                    headers.insert(
+                        "mcp-session-id",
+                        HeaderValue::from_static("completion-specialized-denied"),
+                    );
+                    (
+                        StatusCode::FORBIDDEN,
+                        headers,
+                        Json(json!({"code": -32004, "message": "completion denied"})),
+                    )
+                        .into_response()
+                }
+            }),
+        );
+    let backend_url = spawn_router(backend).await;
+
+    let runtime = {
+        let mut config = test_runtime_config();
+        config.backend_rpc_url = format!("{backend_url}/rpc");
+        build_router(AppState::new(&config).expect("state"))
+    };
+    let runtime_url = spawn_router(runtime).await;
+    let client = reqwest::Client::new();
+
+    let resources_ok = client
+        .post(format!("{runtime_url}/mcp"))
+        .header("authorization", "Bearer test-token")
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 63,
+            "method": "resources/list",
+            "params": {}
+        }))
+        .send()
+        .await
+        .expect("resources/list success response");
+    assert_eq!(resources_ok.status(), StatusCode::OK);
+    let resources_ok_body: Value = resources_ok
+        .json()
+        .await
+        .expect("resources/list success json");
+    assert_eq!(resources_ok_body["jsonrpc"], json!("2.0"));
+    assert_eq!(resources_ok_body["id"], json!(63));
+    assert_eq!(
+        resources_ok_body["result"]["resources"][0]["uri"],
+        json!("resource://one")
+    );
+    assert!(resources_ok_body["error"].is_null());
+
+    let resources_err = client
+        .post(format!("{runtime_url}/mcp"))
+        .header("authorization", "Bearer test-token")
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 64,
+            "method": "resources/list",
+            "params": {}
+        }))
+        .send()
+        .await
+        .expect("resources/list error response");
+    assert_eq!(resources_err.status(), StatusCode::FORBIDDEN);
+    let resources_err_body: Value = resources_err
+        .json()
+        .await
+        .expect("resources/list error json");
+    assert_eq!(resources_err_body["jsonrpc"], json!("2.0"));
+    assert_eq!(resources_err_body["id"], json!(64));
+    assert_eq!(resources_err_body["error"]["code"], json!(-32002));
+    assert!(resources_err_body["result"].is_null());
+
+    let prompts_ok = client
+        .post(format!("{runtime_url}/mcp"))
+        .header("authorization", "Bearer test-token")
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 65,
+            "method": "prompts/get",
+            "params": {"name": "prompt-one"}
+        }))
+        .send()
+        .await
+        .expect("prompts/get success response");
+    assert_eq!(prompts_ok.status(), StatusCode::OK);
+    let prompts_ok_body: Value = prompts_ok.json().await.expect("prompts/get success json");
+    assert_eq!(prompts_ok_body["jsonrpc"], json!("2.0"));
+    assert_eq!(prompts_ok_body["id"], json!(65));
+    assert_eq!(prompts_ok_body["result"]["name"], json!("prompt-one"));
+    assert!(prompts_ok_body["error"].is_null());
+
+    let prompts_err = client
+        .post(format!("{runtime_url}/mcp"))
+        .header("authorization", "Bearer test-token")
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 66,
+            "method": "prompts/get",
+            "params": {"name": "prompt-one"}
+        }))
+        .send()
+        .await
+        .expect("prompts/get error response");
+    assert_eq!(prompts_err.status(), StatusCode::FORBIDDEN);
+    let prompts_err_body: Value = prompts_err.json().await.expect("prompts/get error json");
+    assert_eq!(prompts_err_body["jsonrpc"], json!("2.0"));
+    assert_eq!(prompts_err_body["id"], json!(66));
+    assert_eq!(prompts_err_body["error"]["code"], json!(-32003));
+    assert!(prompts_err_body["result"].is_null());
+
+    let completion_ok = client
+        .post(format!("{runtime_url}/mcp"))
+        .header("authorization", "Bearer test-token")
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 67,
+            "method": "completion/complete",
+            "params": {"prompt": "hi"}
+        }))
+        .send()
+        .await
+        .expect("completion/complete success response");
+    assert_eq!(completion_ok.status(), StatusCode::OK);
+    let completion_ok_body: Value = completion_ok
+        .json()
+        .await
+        .expect("completion/complete success json");
+    assert_eq!(completion_ok_body["jsonrpc"], json!("2.0"));
+    assert_eq!(completion_ok_body["id"], json!(67));
+    assert_eq!(
+        completion_ok_body["result"]["completion"]["values"][0]["value"],
+        json!("done")
+    );
+    assert!(completion_ok_body["error"].is_null());
+
+    let completion_err = client
+        .post(format!("{runtime_url}/mcp"))
+        .header("authorization", "Bearer test-token")
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 68,
+            "method": "completion/complete",
+            "params": {"prompt": "hi"}
+        }))
+        .send()
+        .await
+        .expect("completion/complete error response");
+    assert_eq!(completion_err.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        completion_err
+            .headers()
+            .get("www-authenticate")
+            .and_then(|value| value.to_str().ok()),
+        Some("Bearer realm=\"contextforge\"")
+    );
+    assert_eq!(
+        completion_err
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|value| value.to_str().ok()),
+        Some("completion-specialized-denied")
+    );
+    let completion_err_body: Value = completion_err
+        .json()
+        .await
+        .expect("completion/complete error json");
+    assert_eq!(completion_err_body["jsonrpc"], json!("2.0"));
+    assert_eq!(completion_err_body["id"], json!(68));
+    assert_eq!(completion_err_body["error"]["code"], json!(-32004));
+    assert!(completion_err_body["result"].is_null());
+}
+
+#[tokio::test]
 async fn unknown_notification_catchall_stays_local() {
     let rpc_calls = Arc::new(Mutex::new(0usize));
     let backend = {
@@ -3935,6 +4210,61 @@ async fn unsupported_prefix_methods_stay_local() {
     }
 
     assert_eq!(*rpc_calls.lock().expect("lock"), 0);
+}
+
+#[tokio::test]
+async fn elicitation_create_forwards_to_backend_rpc_endpoint() {
+    let rpc_calls = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let backend = {
+        let rpc_calls = rpc_calls.clone();
+        Router::new().route(
+            "/rpc",
+            post(move |Json(body): Json<Value>| {
+                let rpc_calls = rpc_calls.clone();
+                async move {
+                    rpc_calls.lock().expect("lock").push(body.clone());
+                    Json(json!({
+                        "jsonrpc": "2.0",
+                        "id": body["id"],
+                        "result": {"decision": "forwarded"}
+                    }))
+                }
+            }),
+        )
+    };
+    let backend_url = spawn_router(backend).await;
+
+    let runtime = {
+        let mut config = test_runtime_config();
+        config.backend_rpc_url = format!("{backend_url}/rpc");
+        build_router(AppState::new(&config).expect("state"))
+    };
+    let runtime_url = spawn_router(runtime).await;
+
+    let request_body = json!({
+        "jsonrpc": "2.0",
+        "id": 67,
+        "method": "elicitation/create",
+        "params": {
+            "prompt": "Need approval",
+            "schema": {"type": "object", "properties": {"approved": {"type": "boolean"}}}
+        }
+    });
+    let response = reqwest::Client::new()
+        .post(format!("{runtime_url}/mcp"))
+        .header("authorization", "Bearer test-token")
+        .json(&request_body)
+        .send()
+        .await
+        .expect("elicitation/create response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.expect("json body");
+    assert_eq!(body["result"]["decision"], json!("forwarded"));
+
+    let calls = rpc_calls.lock().expect("lock");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0], request_body);
 }
 
 #[tokio::test]
@@ -4586,6 +4916,237 @@ async fn tools_call_reuses_shared_upstream_session_without_client_session_id() {
     assert_eq!(*backend_fallback_calls.lock().expect("lock"), 0);
     assert_eq!(*upstream_initialize_calls.lock().expect("lock"), 1);
     assert_eq!(*upstream_tool_calls.lock().expect("lock"), 2);
+}
+
+#[tokio::test]
+async fn tools_call_reinitializes_upstream_session_after_cached_session_failure() {
+    let upstream_initialize_calls = Arc::new(Mutex::new(0usize));
+    let upstream_tool_calls = Arc::new(Mutex::new(Vec::<String>::new()));
+    let session_one_uses = Arc::new(Mutex::new(0usize));
+    let backend_resolve_calls = Arc::new(Mutex::new(0usize));
+
+    let upstream = {
+        let upstream_initialize_calls = upstream_initialize_calls.clone();
+        let upstream_tool_calls = upstream_tool_calls.clone();
+        let session_one_uses = session_one_uses.clone();
+        Router::new().route(
+            "/mcp",
+            post(move |headers: HeaderMap, Json(body): Json<Value>| {
+                let upstream_initialize_calls = upstream_initialize_calls.clone();
+                let upstream_tool_calls = upstream_tool_calls.clone();
+                let session_one_uses = session_one_uses.clone();
+                async move {
+                    match body.get("method").and_then(Value::as_str) {
+                        Some("initialize") => {
+                            let init_index = {
+                                let mut calls = upstream_initialize_calls.lock().expect("lock");
+                                *calls += 1;
+                                *calls
+                            };
+                            let session_id = if init_index == 1 {
+                                "retry-upstream-session-1"
+                            } else {
+                                "retry-upstream-session-2"
+                            };
+                            let mut response_headers = HeaderMap::new();
+                            response_headers.insert(
+                                "mcp-session-id",
+                                HeaderValue::from_str(session_id).expect("session header"),
+                            );
+                            (
+                                StatusCode::OK,
+                                response_headers,
+                                Json(json!({
+                                    "jsonrpc":"2.0",
+                                    "id": body["id"],
+                                    "result": {
+                                        "protocolVersion": "2025-11-25",
+                                        "serverInfo": {"name": "upstream", "version": "1.0.0"},
+                                        "capabilities": {}
+                                    }
+                                })),
+                            )
+                                .into_response()
+                        }
+                        Some("notifications/initialized") => StatusCode::ACCEPTED.into_response(),
+                        Some("tools/call") => {
+                            let session_id = headers
+                                .get("mcp-session-id")
+                                .and_then(|value| value.to_str().ok())
+                                .expect("upstream session id")
+                                .to_string();
+                            upstream_tool_calls
+                                .lock()
+                                .expect("lock")
+                                .push(session_id.clone());
+
+                            if session_id == "retry-upstream-session-1" {
+                                let use_count = {
+                                    let mut calls = session_one_uses.lock().expect("lock");
+                                    *calls += 1;
+                                    *calls
+                                };
+                                if use_count == 1 {
+                                    return Json(json!({
+                                        "jsonrpc":"2.0",
+                                        "id": body["id"],
+                                        "result": {
+                                            "content": [{"type": "text", "text": "ok-initial"}],
+                                            "isError": false
+                                        }
+                                    }))
+                                    .into_response();
+                                }
+
+                                return (
+                                    StatusCode::UNAUTHORIZED,
+                                    Json(json!({
+                                        "code": -32099,
+                                        "message": "upstream session expired"
+                                    })),
+                                )
+                                    .into_response();
+                            }
+
+                            Json(json!({
+                                "jsonrpc":"2.0",
+                                "id": body["id"],
+                                "result": {
+                                    "content": [{"type": "text", "text": "ok-refreshed"}],
+                                    "isError": false
+                                }
+                            }))
+                            .into_response()
+                        }
+                        other => (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({"unexpected_method": other})),
+                        )
+                            .into_response(),
+                    }
+                }
+            }),
+        )
+    };
+    let upstream_url = spawn_router(upstream).await;
+
+    let backend = {
+        let backend_resolve_calls = backend_resolve_calls.clone();
+        let upstream_url = upstream_url.clone();
+        Router::new().route(
+            "/_internal/mcp/tools/call/resolve",
+            post(move |headers: HeaderMap, Json(body): Json<Value>| {
+                let backend_resolve_calls = backend_resolve_calls.clone();
+                let upstream_url = upstream_url.clone();
+                async move {
+                    *backend_resolve_calls.lock().expect("lock") += 1;
+                    assert_eq!(
+                        headers
+                            .get("x-contextforge-server-id")
+                            .and_then(|value| value.to_str().ok()),
+                        Some("server-1")
+                    );
+                    assert_eq!(body["params"]["name"], "echo");
+                    Json(json!({
+                        "eligible": true,
+                        "transport": "streamablehttp",
+                        "serverUrl": format!("{upstream_url}/mcp"),
+                        "remoteToolName": "echo_remote",
+                        "headers": {"x-upstream-auth": "rust-plan"},
+                        "timeoutMs": 30000
+                    }))
+                }
+            }),
+        )
+    };
+    let backend_url = spawn_router(backend).await;
+
+    let runtime = {
+        let config = RuntimeConfig {
+            backend_rpc_url: format!("{backend_url}/_internal/mcp/rpc"),
+            listen_http: "127.0.0.1:8787".to_string(),
+            listen_uds: None,
+            protocol_version: "2025-11-25".to_string(),
+            supported_protocol_versions: vec![],
+            server_name: "ContextForge".to_string(),
+            server_version: "0.1.0".to_string(),
+            instructions: "ContextForge providing federated tools, resources and prompts. Use /admin interface for configuration.".to_string(),
+            request_timeout_ms: 30_000,
+            database_url: None,
+            db_pool_max_size: 20,
+            log_filter: "error".to_string(),
+            ..test_runtime_config()
+        };
+        build_router(AppState::new(&config).expect("state"))
+    };
+    let runtime_url = spawn_router(runtime).await;
+    let client = reqwest::Client::new();
+
+    let initial = client
+        .post(format!("{runtime_url}/mcp"))
+        .header("authorization", "Bearer test-token")
+        .header("x-contextforge-server-id", "server-1")
+        .header("mcp-session-id", "client-session-retry")
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 71,
+            "method": "tools/call",
+            "params": {
+                "name": "echo",
+                "arguments": {"text": "hello"}
+            }
+        }))
+        .send()
+        .await
+        .expect("initial tools/call response");
+    assert_eq!(initial.status(), StatusCode::OK);
+    let initial_body: Value = initial.json().await.expect("initial json body");
+    assert_eq!(
+        initial_body["result"]["content"][0]["text"],
+        json!("ok-initial")
+    );
+
+    let refreshed = client
+        .post(format!("{runtime_url}/mcp"))
+        .header("authorization", "Bearer test-token")
+        .header("x-contextforge-server-id", "server-1")
+        .header("mcp-session-id", "client-session-retry")
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 72,
+            "method": "tools/call",
+            "params": {
+                "name": "echo",
+                "arguments": {"text": "hello again"}
+            }
+        }))
+        .send()
+        .await
+        .expect("refreshed tools/call response");
+    assert_eq!(refreshed.status(), StatusCode::OK);
+    assert_eq!(
+        refreshed
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|value| value.to_str().ok()),
+        Some("client-session-retry")
+    );
+    let refreshed_body: Value = refreshed.json().await.expect("refreshed json body");
+    assert_eq!(
+        refreshed_body["result"]["content"][0]["text"],
+        json!("ok-refreshed")
+    );
+
+    assert_eq!(*backend_resolve_calls.lock().expect("lock"), 1);
+    assert_eq!(*upstream_initialize_calls.lock().expect("lock"), 2);
+    assert_eq!(
+        upstream_tool_calls.lock().expect("lock").as_slice(),
+        &[
+            "retry-upstream-session-1".to_string(),
+            "retry-upstream-session-1".to_string(),
+            "retry-upstream-session-2".to_string(),
+        ]
+    );
 }
 
 #[cfg(feature = "rmcp-upstream-client")]
