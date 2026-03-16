@@ -33,6 +33,52 @@ Recommended next step:
   text with generic transport-safe messages while keeping detailed logs
   server-side.
 
+### 1a. JSON-RPC plugin violations can still surface non-200 HTTP statuses
+
+Status:
+- Deferred Python/MCP protocol-shaping follow-up
+
+Observed behavior:
+- The global `PluginViolationError` handler now derives HTTP status from plugin
+  metadata / violation-code mappings instead of always returning HTTP `200`.
+- That is fine for generic REST endpoints, but it is awkward for JSON-RPC /
+  MCP clients that expect HTTP `200` and parse the body-level `error` object.
+
+Why this matters:
+- A plugin deny path on MCP/JSON-RPC can look like a transport failure instead
+  of a protocol-level error, depending on the client.
+
+Likely area:
+- `mcpgateway/main.py`
+- global plugin violation exception handling for MCP / JSON-RPC routes
+
+Recommended next step:
+- Decide whether MCP / JSON-RPC routes should force HTTP `200` for plugin
+  violations while keeping richer HTTP statuses for REST endpoints.
+
+### 1b. Prompt post-hook payload still uses `prompt_id` for a prompt name
+
+Status:
+- Deferred Python/plugin contract follow-up
+
+Observed behavior:
+- `PromptPosthookPayload.prompt_id` is populated with the MCP prompt name rather
+  than the backing database UUID.
+
+Why this matters:
+- MCP prompt identity is name-based, so the current behavior may be intentional,
+  but the field name and plugin-facing semantics are now misleading.
+- Existing or future plugins that treat `prompt_id` as a database UUID could
+  break silently.
+
+Likely area:
+- `mcpgateway/services/prompt_service.py`
+- plugin payload schema / docs for prompt post-fetch hooks
+
+Recommended next step:
+- Decide whether to rename the field to reflect MCP name semantics, or restore a
+  true UUID field and add a separate prompt-name field for MCP-oriented plugins.
+
 ### 2. Python `session_id` query-parameter compatibility debt
 
 Status:
@@ -56,6 +102,49 @@ Recommended next step:
 - Decide whether to formally deprecate the query-parameter fallback, add
   explicit warnings/telemetry, and retire it in a separate compatibility
   cleanup.
+
+### 2a. Client-supplied initialize session ids remain a shared Python/Rust compatibility behavior
+
+Status:
+- Deferred product/security semantics follow-up
+
+Observed behavior:
+- Both Python and Rust currently accept client-supplied initialize session ids:
+  - Python `_execute_rpc_initialize(...)` accepts `session_id` / `sessionId`
+    from JSON-RPC params plus `session_id` from the query string.
+  - Rust `requested_initialize_session_id(...)` accepts the same logical
+    inputs, with the transport header taking precedence when present.
+- This is not a Rust-only behavior introduced by this PR.
+- On the settled auth-required full-Rust stack, an authenticated second caller
+  could not hijack another caller's chosen initialize session id:
+  - the first caller initialized successfully
+  - the second caller targeting the same id received JSON-RPC `-32003 Access denied`
+- The remaining concern is the permissive/public MCP mode:
+  - ownerless sessions are intentionally allowed today
+  - custom client-chosen session ids are not constrained to UUID format
+  - that combination makes public/unauthenticated session semantics easier to
+    reason about incorrectly
+
+Why this matters:
+- Predictable client-chosen initialize session ids are more sensitive than
+  server-emitted opaque ids.
+- The behavior is currently a shared MCP transport compatibility choice rather
+  than a newly introduced Rust regression.
+
+Likely area:
+- `mcpgateway/main.py`
+- `mcpgateway/cache/session_registry.py`
+- `tools_rust/mcp_runtime/src/lib.rs`
+
+Recommended next step:
+- Decide whether client-supplied initialize session ids should remain a
+  supported compatibility feature.
+- If yes:
+  - document the authenticated vs unauthenticated semantics explicitly
+  - add validation/telemetry for custom initialize session ids
+- If no:
+  - deprecate and remove the behavior in a coordinated Python + Rust change
+    rather than changing only one side in the Rust PR.
 
 ### 3. Non-admin scoped `tools.execute` on `/servers/{id}/mcp`
 
@@ -89,6 +178,29 @@ Recommended next step:
 - If yes, change the product behavior and update the access-matrix tests to
   prove the positive path.
 - If no, document this restriction more explicitly in the MCP/RBAC docs.
+
+### 3a. Rust direct tools/call can share upstream MCP sessions when no downstream session exists
+
+Status:
+- Deferred Rust-specific correctness/isolation follow-up
+
+Observed behavior:
+- `build_upstream_session_key()` uses `shared:{hash}` when `tools/call` runs
+  without a downstream MCP session id.
+- That means multiple callers that resolve to the same upstream target and auth
+  plan can reuse a single upstream MCP session.
+
+Why this matters:
+- Stateful upstream MCP servers can leak state or cross-contaminate behavior
+  between otherwise unrelated callers on the sessionless direct-execution path.
+
+Likely area:
+- `tools_rust/mcp_runtime/src/lib.rs`
+
+Recommended next step:
+- Decide whether sessionless callers should:
+  - never reuse upstream sessions, or
+  - use a caller-specific key that still isolates upstream state between users.
 
 ### 4. Python aggregated `/mcp` resource-read ambiguity
 
@@ -581,7 +693,84 @@ Recommended next step:
   should consume a revocation/invalidation signal from Python to drop cached
   auth state immediately.
 
-#### 21. Legacy migration suites are still red
+#### 21. Sustained tools-only load still has a small internal-auth/control-plane failure tail
+
+Status:
+- Deferred Rust-specific performance/reliability follow-up
+
+Observed behavior:
+- On the normal full-Rust compose stack, sustained distributed tools-only load
+  is still not perfectly clean:
+  - `make benchmark-mcp-tools-300 MCP_BENCHMARK_HIGH_USERS=1000 MCP_BENCHMARK_HIGH_RUN_TIME=300s`
+    produced `20` failures in `1,842,181` requests on the richer `fast_time`
+    server profile.
+- After isolating the upstreams:
+  - the simpler `fast_test` server reduced the same class of load to `3`
+    failures in `1,042,973` requests, all plain `502`s
+  - a controlled `fast_time` run with
+    `MCP_RUST_USE_RMCP_UPSTREAM_CLIENT=false` removed the `HTTP 0` / ~30s tail
+    entirely and reduced the exact `1000 users / 300s` run to `9` failures in
+    `1,799,022` requests
+- The remaining `9` failures with RMCP explicitly off were all internal
+  control-plane `502`s:
+  - `8` `tools/call` failures from Rust -> Python
+    `/_internal/mcp/authenticate`
+  - `1` `tools/list` failure from Rust -> Python
+    `/_internal/mcp/tools/list/authz`
+
+Why this matters:
+- The current “sustained-load tail” is not one problem:
+  - one part is specific to the experimental RMCP upstream client path on the
+    richer `fast_time` server profile
+  - the other part is a lower-rate internal Rust -> Python auth/authz hop
+    reliability issue under heavy distributed load
+- This is now a bounded, diagnosable release note rather than a vague generic
+  instability concern.
+
+Likely area:
+- `tools_rust/mcp_runtime/src/lib.rs`
+- Rust internal backend auth/authz client path
+- RMCP upstream client path for direct `tools/call`
+
+Recommended next step:
+- Keep the sustained tools-only failure tail split into two sub-investigations:
+  - internal Rust -> Python auth/authz send failures under heavy load
+  - RMCP upstream client instability on the richer `fast_time` benchmark path
+- Re-run the same `1000 users / 300s` benchmark after any auth/authz client
+  tuning and after any RMCP upstream client fixes, rather than treating all
+  remaining failures as one bucket.
+
+#### 22. Docker Compose currently exports an empty RMCP bool env var
+
+Status:
+- Deferred configuration/wiring follow-up
+
+Observed behavior:
+- The current compose wiring exports
+  `MCP_RUST_USE_RMCP_UPSTREAM_CLIENT=` into the gateway container even when the
+  operator has not set a value.
+- In practice, the normal full-Rust compose stack behaved as if the RMCP
+  upstream client path was enabled, while an explicit
+  `MCP_RUST_USE_RMCP_UPSTREAM_CLIENT=false` runtime override materially changed
+  the sustained-load results.
+
+Why this matters:
+- Empty-string bool env handling is easy to misread operationally.
+- The experimental RMCP path should not appear enabled “by accident” through
+  ambiguous compose/env wiring.
+
+Likely area:
+- `docker-compose.yml`
+- Rust runtime bool env parsing / startup visibility
+
+Recommended next step:
+- Make the compose behavior unambiguous:
+  - either omit the env var entirely when unset
+  - or set it explicitly to `true` / `false`
+- Add a small startup/logging signal or health detail that makes the effective
+  RMCP-upstream-client mode obvious during live testing.
+
+#### 23. Legacy migration suites are still red
 
 Status:
 - Deferred broader release/upgrade follow-up
@@ -610,35 +799,38 @@ Recommended next step:
   fix the legacy migration/data-retention issues independently of the Rust MCP
   transport PR.
 
-#### 22. Live PostgreSQL TLS validation is still unexecuted
+#### 24. PostgreSQL client-certificate authentication is still unsupported
 
 Status:
-- Deferred release-validation follow-up
+- Deferred feature-gap follow-up
 
 Observed behavior:
-- Rust PostgreSQL TLS support was implemented and local non-TLS compose runs
-  are green.
-- Python already supports PostgreSQL TLS via libpq/SQLAlchemy URL parameters.
-- This checklist pass did not run against a live PostgreSQL deployment that
-  actually requires TLS.
+- Live PostgreSQL TLS validation has now been executed locally for:
+  - Python with `sslmode=require`
+  - Rust with `sslmode=require`
+  - Rust with `sslmode=prefer`
+  - Rust non-TLS fallback with `sslmode=disable`
+- Those paths are all working as expected.
+- The remaining gap is PostgreSQL client-certificate authentication on the
+  Rust runtime path:
+  - `sslcert` / `sslkey` in `MCP_RUST_DATABASE_URL` are not supported
+  - the runtime fails fast clearly at startup instead of silently ignoring the
+    settings
 
 Why this matters:
-- The feature exists, but local release validation still lacks a true
-  end-to-end TLS-required database exercise for both Python and Rust paths.
+- The current behavior is safe and explicit, but environments that require
+  mTLS-style PostgreSQL client auth still cannot use the Rust runtime path.
 
 Likely area:
-- deployment-specific validation environment
-- Rust database startup/config path in `tools_rust/mcp_runtime/src/lib.rs`
+- Rust database URL/config parsing and TLS connector setup in
+  `tools_rust/mcp_runtime/src/lib.rs`
 
 Recommended next step:
-- Provision a TLS-required PostgreSQL target and validate:
-  - Python with `DATABASE_URL=...?...sslmode=require`
-  - Rust with `MCP_RUST_DATABASE_URL=...?...sslmode=require`
-  - Rust with `sslmode=prefer`
-  - Rust with `sslrootcert=/path/to/ca.pem`
-  - explicit failure for unsupported `sslcert` / `sslkey`
+- Add actual `sslcert` / `sslkey` support for the Rust PostgreSQL client path.
+- Keep the current fail-fast startup validation until client-cert auth is fully
+  implemented and tested end to end.
 
-#### 23. Minikube clean reinstall flow still looks unhealthy
+#### 25. Minikube clean reinstall flow still looks unhealthy
 
 Status:
 - Deferred Helm/deployment follow-up
@@ -664,7 +856,7 @@ Recommended next step:
   issue is in Helm invocation, namespace lifecycle timing, or local Minikube
   state.
 
-#### 24. Optional `2025-11-25-report` surface is not release-clean
+#### 26. Optional `2025-11-25-report` surface is not release-clean
 
 Status:
 - Deferred protocol-surface follow-up
@@ -674,32 +866,137 @@ Observed behavior:
   full-Rust stack.
 - The broader optional report target is still red:
   - `9 failed, 44 passed, 2 skipped`
-- Remaining failing live methods were:
-  - `completion/complete`
-  - `prompts/get`
-  - `resources/read`
-  - `resources/subscribe`
-  - `sampling/createMessage`
-  - `tasks/list|get|result|cancel`
+- Remaining failing live methods on the Rust full path were:
+  - `completion/complete` -> HTTP `500`
+  - `prompts/get` -> HTTP `404`
+  - `resources/read` -> HTTP `404`
+  - `resources/subscribe` -> HTTP `500`
+  - `sampling/createMessage` -> HTTP `500`
+  - `tasks/list|get|result|cancel` -> HTTP `200`, but error code `-32000`
+- The same targeted calls were replayed against the plain Python stack:
+  - `completion/complete` -> HTTP `200`, valid JSON-RPC `result`
+  - `prompts/get` -> HTTP `200`, JSON-RPC `error` envelope
+  - `resources/read` -> HTTP `200`, JSON-RPC `result`
+  - `resources/subscribe` -> HTTP `200`, `-32601`
+  - `sampling/createMessage` -> HTTP `200`, `-32602`
+  - `tasks/list|get|result|cancel` -> HTTP `200`, `-32601` / `-32602`
 
 Why this matters:
-- This is a broader MCP optional-surface compliance issue, not a core Rust MCP
-  transport failure.
-- Some of these may be true product gaps, while others may be generic sample
-  data / expectation mismatches in the compliance harness.
+- These failures are mostly Rust-path parity gaps on the broader optional
+  report surface, not just generic product limitations.
+- They are still not being treated as merge blockers for this PR because:
+  - `2025-11-25-core` and `2025-11-25-auth` are green
+  - the main live MCP runtime lanes are green
+  - this lane is broader optional/report coverage rather than the primary
+    release gate for the experimental opt-in Rust MCP runtime
 
 Likely area:
-- `tests/compliance/mcp_2025_11_25/*`
+- `tools_rust/mcp_runtime/src/lib.rs`
+- Python internal MCP handlers reached via the Rust bridge
 - optional MCP method behavior and error-shape expectations
 - server-specific sample-data assumptions for prompts/resources/completion
 
 Recommended next step:
-- Triage each failing optional method and separate:
-  - harness/sample-data assumptions
-  - expected product limitations
-  - true protocol/error-shape defects
-- Only then decide whether to expand the release gate beyond `core` and
-  `auth`.
+- Bring the Rust full path into parity with the Python path for the optional
+  report surface, specifically:
+  - return JSON-RPC envelopes on `prompts/get` / `resources/read` missing-item
+    paths instead of Rust-only `404`s
+  - map `resources/subscribe` and `sampling/createMessage` failures to clean
+    JSON-RPC method/params errors instead of opaque `500`s
+  - align unsupported `tasks/*` methods to `-32601` / `-32602`
+  - align `completion/complete` missing-prompt behavior with the Python path
+
+#### 27. Nginx should still strip internal `x-contextforge-*` trust headers as defense in depth
+
+Status:
+- Deferred deployment hardening follow-up
+
+Observed behavior:
+- The direct trust-boundary bypass is fixed in this PR:
+  - trusted `/_internal/mcp/*` requests now require loopback, the Rust runtime
+    marker header, and a shared-secret-derived internal auth header
+- However, the nginx configs do not currently clear internal
+  `x-contextforge-*` trust headers from public requests before proxying them to
+  the gateway.
+
+Why this matters:
+- This is no longer a direct merge blocker because Python no longer trusts only
+  the forwarded header names.
+- It is still worthwhile defense in depth:
+  - reduces accidental future trust on spoofable public headers
+  - reduces confusing logs/debug traces that appear to carry internal headers
+
+Likely area:
+- `infra/nginx/nginx-performance.conf`
+- `infra/nginx/nginx-tls.conf`
+- other nginx variants used for embedded/test deployments
+
+Recommended next step:
+- Explicitly clear internal trust headers at the public nginx ingress layers,
+  including at least:
+  - `x-contextforge-mcp-runtime`
+  - `x-contextforge-mcp-runtime-auth`
+  - `x-contextforge-auth-context`
+  - `x-contextforge-server-id`
+  - any session-validation or affinity-only internal headers
+
+#### 28. Edge-mode Rust public listener still defaults to `0.0.0.0:8787`
+
+Status:
+- Deferred deployment-hardening follow-up
+
+Observed behavior:
+- `docker-entrypoint.sh` currently defaults `MCP_RUST_PUBLIC_LISTEN_HTTP` to
+  `0.0.0.0:8787` when:
+  - Rust runtime is enabled
+  - Rust runtime is managed
+  - session-auth reuse is enabled
+
+Why this matters:
+- The public Rust listener is meant for nginx-mediated edge/full mode.
+- Binding it broadly by default increases the chance of direct sidecar
+  exposure in ad-hoc or partially hardened deployments.
+
+Likely area:
+- `docker-entrypoint.sh`
+- compose/Helm docs around edge/full deployment expectations
+
+Recommended next step:
+- Decide whether the safer default should be:
+  - loopback-only by default, with explicit opt-in for wider bind addresses, or
+  - current broad bind, but with much clearer deployment guidance and warnings
+    when nginx or network policy is not constraining exposure.
+
+#### 29. Forwarded internal auth context is still trusted by channel security, not by its own signature
+
+Status:
+- Deferred internal-transport hardening follow-up
+
+Observed behavior:
+- Internal MCP auth context continues to be forwarded as base64-encoded JSON.
+- After the current C1 fix, those forwarded requests are protected by:
+  - loopback checks on the Python side
+  - the Rust runtime marker header
+  - the shared-secret-derived `x-contextforge-mcp-runtime-auth` header
+- The auth context payload itself is not separately signed.
+
+Why this matters:
+- The current model is acceptable for the local trusted channel the runtime is
+  using today.
+- If the internal transport model broadens in future, independently signing or
+  MACing the auth context may become desirable rather than trusting only the
+  channel and outer request authenticator.
+
+Likely area:
+- `mcpgateway/main.py`
+- `mcpgateway/middleware/token_scoping.py`
+- `mcpgateway/transports/rust_mcp_runtime_proxy.py`
+- `tools_rust/mcp_runtime/src/lib.rs`
+
+Recommended next step:
+- Keep the current channel-authenticated approach for now.
+- If the internal hop ever extends beyond tightly local/private channels,
+  consider signing or MACing the forwarded auth context itself.
 
 ## Not In Scope Here
 

@@ -3667,7 +3667,7 @@ async def test_set_logging_level_exception():
 
 @pytest.mark.asyncio
 async def test_set_logging_level_requires_servers_use(monkeypatch):
-    """logging/setLevel requires servers.use permission for authenticated users."""
+    """logging/setLevel requires admin.system_config permission for authenticated users."""
     # First-Party
     from mcpgateway.transports.streamablehttp_transport import set_logging_level
 
@@ -3691,7 +3691,7 @@ async def test_set_logging_level_requires_servers_use(monkeypatch):
     mock_logging_service.set_level = AsyncMock()
     monkeypatch.setattr("mcpgateway.transports.streamablehttp_transport.logging_service", mock_logging_service)
 
-    # Should raise PermissionError for non-admin user without servers.use
+    # Should raise PermissionError for non-admin user without admin.system_config
     with pytest.raises(PermissionError, match="Access denied"):
         await set_logging_level("info")
     mock_logging_service.set_level.assert_not_called()
@@ -3699,7 +3699,7 @@ async def test_set_logging_level_requires_servers_use(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_set_logging_level_admin_allowed(monkeypatch):
-    """logging/setLevel succeeds when the caller has servers.use permission."""
+    """logging/setLevel succeeds when the caller has admin.system_config permission."""
     # Third-Party
     from mcp import types as mcp_types
 

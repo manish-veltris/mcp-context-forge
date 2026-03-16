@@ -2223,14 +2223,12 @@ async def set_logging_level(level: types.LoggingLevel) -> types.EmptyResult:
 
     if _should_enforce_streamable_rbac(user_context):
         # Layer 1: Token scope cap
-        # MCP logging/setLevel is a standard MCP capability invoked by clients during
-        # initialization; servers.use (not admin.system_config) keeps the handshake working.
-        if not _check_scoped_permission(user_context, "servers.use"):
+        if not _check_scoped_permission(user_context, "admin.system_config"):
             raise PermissionError(_ACCESS_DENIED_MSG)
         # Layer 2: RBAC check
         has_permission = await _check_streamable_permission(
             user_context=user_context,
-            permission="servers.use",
+            permission="admin.system_config",
             check_any_team=_check_any_team_for_server_scoped_rbac(user_context, server_id),
         )
         if not has_permission:

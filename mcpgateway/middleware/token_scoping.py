@@ -13,6 +13,8 @@ and time-based restrictions.
 # Standard
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
+import hashlib
+import hmac
 import ipaddress
 import re
 from typing import List, Optional, Pattern, Tuple
@@ -62,6 +64,8 @@ _AUTH_COOKIE_NAMES = ("jwt_token", "access_token")
 _INTERNAL_MCP_PATH_PREFIX = "/_internal/mcp"
 _INTERNAL_MCP_RUNTIME_HEADER = "x-contextforge-mcp-runtime"
 _INTERNAL_MCP_AUTH_CONTEXT_HEADER = "x-contextforge-auth-context"
+_INTERNAL_MCP_RUNTIME_AUTH_HEADER = "x-contextforge-mcp-runtime-auth"
+_INTERNAL_MCP_RUNTIME_AUTH_CONTEXT = "contextforge-internal-mcp-runtime-v1"
 
 # Permission map with precompiled patterns
 # Maps (HTTP method, path pattern) to required permission
@@ -1355,11 +1359,31 @@ class TokenScopingMiddleware:
         if request.headers.get(_INTERNAL_MCP_RUNTIME_HEADER) != "rust":
             return False
 
+        provided_auth = request.headers.get(_INTERNAL_MCP_RUNTIME_AUTH_HEADER)
+        if not provided_auth:
+            return False
+
+        expected_auth = self._expected_internal_mcp_runtime_auth_header()
+        if not hmac.compare_digest(provided_auth, expected_auth):
+            return False
+
         if not request.headers.get(_INTERNAL_MCP_AUTH_CONTEXT_HEADER):
             return False
 
         client_host = getattr(getattr(request, "client", None), "host", None)
         return client_host in ("127.0.0.1", "::1")
+
+    @staticmethod
+    @lru_cache(maxsize=1)
+    def _expected_internal_mcp_runtime_auth_header() -> str:
+        """Return the expected shared internal-auth header for Rust MCP hops.
+
+        Returns:
+            Shared secret-derived digest expected on trusted internal Rust MCP calls.
+        """
+        secret = settings.auth_encryption_secret.get_secret_value()
+        material = f"{secret}:{_INTERNAL_MCP_RUNTIME_AUTH_CONTEXT}".encode("utf-8")
+        return hashlib.sha256(material).hexdigest()
 
 
 # Create middleware instance

@@ -33,6 +33,7 @@ from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 from functools import lru_cache
 import hashlib
+import hmac
 import html
 import re
 import sys
@@ -309,6 +310,8 @@ def get_user_email(user):
 
 
 _INTERNAL_MCP_AUTH_CONTEXT_HEADER = "x-contextforge-auth-context"
+_INTERNAL_MCP_RUNTIME_AUTH_HEADER = "x-contextforge-mcp-runtime-auth"
+_INTERNAL_MCP_RUNTIME_AUTH_CONTEXT = "contextforge-internal-mcp-runtime-v1"
 _INTERNAL_MCP_SESSION_VALIDATED_HEADER = "x-contextforge-session-validated"
 
 
@@ -347,6 +350,33 @@ def _decode_internal_mcp_auth_context(header_value: str) -> Dict[str, Any]:
     return payload
 
 
+@lru_cache(maxsize=1)
+def _expected_internal_mcp_runtime_auth_header() -> str:
+    """Return the shared secret-derived trust header for Rust->Python MCP hops.
+
+    Returns:
+        Hex-encoded SHA-256 digest derived from the shared auth secret.
+    """
+    secret = settings.auth_encryption_secret.get_secret_value()
+    material = f"{secret}:{_INTERNAL_MCP_RUNTIME_AUTH_CONTEXT}".encode("utf-8")
+    return hashlib.sha256(material).hexdigest()
+
+
+def _has_valid_internal_mcp_runtime_auth_header(request: Request) -> bool:
+    """Validate the shared secret-derived trust header for internal MCP requests.
+
+    Args:
+        request: Incoming internal MCP request.
+
+    Returns:
+        ``True`` when the derived trust header matches the expected value.
+    """
+    provided = request.headers.get(_INTERNAL_MCP_RUNTIME_AUTH_HEADER)
+    if not provided:
+        return False
+    return hmac.compare_digest(provided, _expected_internal_mcp_runtime_auth_header())
+
+
 def _is_trusted_internal_mcp_runtime_request(request: Request) -> bool:
     """Return whether the request came from the local Rust runtime sidecar.
 
@@ -359,7 +389,7 @@ def _is_trusted_internal_mcp_runtime_request(request: Request) -> bool:
     """
     runtime_marker = request.headers.get("x-contextforge-mcp-runtime")
     client_host = getattr(getattr(request, "client", None), "host", None)
-    return runtime_marker == "rust" and client_host in ("127.0.0.1", "::1")
+    return runtime_marker == "rust" and _has_valid_internal_mcp_runtime_auth_header(request) and client_host in ("127.0.0.1", "::1")
 
 
 def _build_internal_mcp_forwarded_user(request: Request) -> Dict[str, Any]:
@@ -9290,9 +9320,7 @@ async def _handle_rpc_authenticated(request: Request, db: Session, user):
             # Catch-all for other completion/* methods (currently unsupported)
             result = {}
         elif method == "logging/setLevel":
-            # MCP logging/setLevel is a standard MCP capability invoked by clients during
-            # initialization; servers.use (not admin.system_config) keeps the handshake working.
-            await _ensure_rpc_permission(user, db, "servers.use", method, request=request)
+            await _ensure_rpc_permission(user, db, "admin.system_config", method, request=request)
             level = LogLevel(params.get("level"))
             await logging_service.set_level(level)
             result = {}

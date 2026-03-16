@@ -39,6 +39,7 @@ from mcpgateway.main import (
     InternalTrustedMCPTransportBridge,
     MCPRuntimeHeaderTransportWrapper,
     MCPPathRewriteMiddleware,
+    _expected_internal_mcp_runtime_auth_header,
     _build_internal_mcp_auth_scope,
     _build_internal_mcp_forwarded_user,
     _decode_internal_mcp_auth_context,
@@ -131,6 +132,17 @@ def _make_request(
     request.cookies = cookies or {}
     request.query_params = query_params or {}
     return request
+
+
+def _trusted_internal_mcp_headers(auth_context: dict[str, object], **extra_headers: str) -> dict[str, str]:
+    """Build trusted Rust->Python internal MCP headers for unit tests."""
+    headers = {
+        "x-contextforge-mcp-runtime": "rust",
+        "x-contextforge-mcp-runtime-auth": _expected_internal_mcp_runtime_auth_header(),
+        "x-contextforge-auth-context": base64.urlsafe_b64encode(orjson.dumps(auth_context)).decode().rstrip("="),
+    }
+    headers.update(extra_headers)
+    return headers
 
 
 def _import_fresh_main_module(
@@ -382,6 +394,7 @@ class TestInternalTrustedMcpTransportBridge:
             "query_string": b"session_id=abc123",
             "headers": [
                 (b"x-contextforge-mcp-runtime", b"rust"),
+                (b"x-contextforge-mcp-runtime-auth", _expected_internal_mcp_runtime_auth_header().encode("ascii")),
                 (b"x-contextforge-auth-context", encoded_auth.encode("ascii")),
                 (b"x-contextforge-server-id", b"server-1"),
             ],
@@ -443,6 +456,7 @@ class TestInternalTrustedMcpTransportBridge:
             "query_string": b"session_id=abc123",
             "headers": [
                 (b"x-contextforge-mcp-runtime", b"rust"),
+                (b"x-contextforge-mcp-runtime-auth", _expected_internal_mcp_runtime_auth_header().encode("ascii")),
                 (b"x-contextforge-auth-context", encoded_auth.encode("ascii")),
                 (b"x-contextforge-session-validated", b"rust"),
             ],
@@ -503,6 +517,7 @@ class TestInternalTrustedMcpTransportBridge:
             "query_string": b"",
             "headers": [
                 (b"x-contextforge-mcp-runtime", b"rust"),
+                (b"x-contextforge-mcp-runtime-auth", _expected_internal_mcp_runtime_auth_header().encode("ascii")),
                 (b"x-contextforge-auth-context", encoded_auth.encode("ascii")),
                 (b"x-contextforge-server-id", b"server-1"),
             ],
@@ -532,7 +547,10 @@ class TestInternalTrustedMcpTransportBridge:
             "method": "GET",
             "path": "/_internal/mcp/transport",
             "query_string": b"",
-            "headers": [(b"x-contextforge-mcp-runtime", b"rust")],
+            "headers": [
+                (b"x-contextforge-mcp-runtime", b"rust"),
+                (b"x-contextforge-mcp-runtime-auth", _expected_internal_mcp_runtime_auth_header().encode("ascii")),
+            ],
             "client": ("127.0.0.1", 5000),
         }
 
@@ -864,6 +882,7 @@ class TestInternalMcpHelperCoverage:
         request = MagicMock(spec=Request)
         request.headers = {
             "x-contextforge-mcp-runtime": "rust",
+            "x-contextforge-mcp-runtime-auth": _expected_internal_mcp_runtime_auth_header(),
             "x-contextforge-auth-context": "not-base64",
         }
         request.client = SimpleNamespace(host="127.0.0.1")
@@ -875,27 +894,36 @@ class TestInternalMcpHelperCoverage:
         assert excinfo.value.status_code == 400
         assert "Invalid trusted MCP auth context" in excinfo.value.detail
 
-    def test_build_internal_mcp_forwarded_user_sets_session_validated_and_token_teams(self):
-        """Trusted forwarded auth should copy teams and set the Rust session validation marker."""
+    def test_build_internal_mcp_forwarded_user_requires_internal_runtime_auth_header(self):
+        """Trusted Rust forwarding must include the shared internal-auth header."""
         request = MagicMock(spec=Request)
         request.headers = {
             "x-contextforge-mcp-runtime": "rust",
-            "x-contextforge-session-validated": "rust",
-            "x-contextforge-auth-context": base64.urlsafe_b64encode(
-                orjson.dumps(
-                    {
-                        "email": "user@example.com",
-                        "teams": ["team-a"],
-                        "is_authenticated": True,
-                        "is_admin": False,
-                        "permission_is_admin": True,
-                        "token_use": "session",
-                    }
-                )
-            )
-            .decode()
-            .rstrip("="),
+            "x-contextforge-auth-context": base64.urlsafe_b64encode(orjson.dumps({"email": "user@example.com"})).decode().rstrip("="),
         }
+        request.client = SimpleNamespace(host="127.0.0.1")
+        request.state = MagicMock()
+
+        with pytest.raises(HTTPException) as excinfo:
+            _build_internal_mcp_forwarded_user(request)
+
+        assert excinfo.value.status_code == 403
+        assert "only available to the local Rust runtime" in excinfo.value.detail
+
+    def test_build_internal_mcp_forwarded_user_sets_session_validated_and_token_teams(self):
+        """Trusted forwarded auth should copy teams and set the Rust session validation marker."""
+        request = MagicMock(spec=Request)
+        request.headers = _trusted_internal_mcp_headers(
+            {
+                "email": "user@example.com",
+                "teams": ["team-a"],
+                "is_authenticated": True,
+                "is_admin": False,
+                "permission_is_admin": True,
+                "token_use": "session",
+            },
+            **{"x-contextforge-session-validated": "rust"},
+        )
         request.client = SimpleNamespace(host="127.0.0.1")
         request.state = SimpleNamespace()
 
@@ -4813,6 +4841,19 @@ class TestA2ABranchCoverage:
 
 class TestRpcHandling:
     """Cover RPC handler branches."""
+
+    @pytest.fixture(autouse=True)
+    def _trust_internal_rust_headers_for_handler_logic_tests(self, monkeypatch):
+        """Keep this suite focused on handler logic, not trust-boundary validation.
+
+        The trust boundary itself is covered separately by the dedicated helper
+        and middleware tests above.
+        """
+        monkeypatch.setattr(
+            "mcpgateway.main._is_trusted_internal_mcp_runtime_request",
+            lambda request: request.headers.get("x-contextforge-mcp-runtime") == "rust"
+            and getattr(getattr(request, "client", None), "host", None) in ("127.0.0.1", "::1"),
+        )
 
     @staticmethod
     def _make_request(payload: dict) -> MagicMock:
@@ -10784,18 +10825,18 @@ class TestRpcScopedPermissions:
         assert result["error"]["code"] == -32003
         assert "Access denied" in result["error"]["message"]
 
-    async def test_logging_set_level_allowed_with_servers_use(self):
-        """Token scoped to servers.use should be allowed logging/setLevel."""
+    async def test_logging_set_level_allowed_with_admin_system_config(self):
+        """Token scoped to admin.system_config should be allowed logging/setLevel."""
         payload = {"jsonrpc": "2.0", "id": 1, "method": "logging/setLevel", "params": {"level": "error"}}
-        request = self._make_request(payload, scoped_permissions=["servers.use"])
+        request = self._make_request(payload, scoped_permissions=["admin.system_config"])
 
         result = await handle_rpc(request, db=MagicMock(), user={"email": "user@example.com"})
         assert "error" not in result
 
-    async def test_logging_set_level_denied_without_servers_use(self):
-        """Token scoped to tools.read only (no servers.use) should be denied logging/setLevel."""
+    async def test_logging_set_level_denied_without_admin_system_config(self):
+        """Token scoped without admin.system_config should be denied logging/setLevel."""
         payload = {"jsonrpc": "2.0", "id": 1, "method": "logging/setLevel", "params": {"level": "error"}}
-        request = self._make_request(payload, scoped_permissions=["tools.read"])
+        request = self._make_request(payload, scoped_permissions=["servers.use"])
 
         result = await handle_rpc(request, db=MagicMock(), user={"email": "user@example.com"})
         assert result["error"]["code"] == -32003

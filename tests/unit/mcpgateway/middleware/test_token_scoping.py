@@ -12,6 +12,7 @@ This module tests the token scoping middleware, particularly the security fixes 
 """
 
 # Standard
+import hashlib
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -21,8 +22,19 @@ from starlette.responses import Response
 import pytest
 
 # First-Party
+from mcpgateway.config import settings
 from mcpgateway.db import Permissions
 from mcpgateway.middleware.token_scoping import _get_llm_permission_patterns, TokenScopingMiddleware
+
+
+def _trusted_internal_runtime_headers() -> dict[str, str]:
+    secret = settings.auth_encryption_secret.get_secret_value()
+    expected = hashlib.sha256(f"{secret}:contextforge-internal-mcp-runtime-v1".encode("utf-8")).hexdigest()
+    return {
+        "x-contextforge-mcp-runtime": "rust",
+        "x-contextforge-mcp-runtime-auth": expected,
+        "x-contextforge-auth-context": "trusted-payload",
+    }
 
 
 @pytest.fixture(autouse=True)
@@ -148,11 +160,7 @@ class TestTokenScopingMiddleware:
         mock_request.url.path = "/_internal/mcp/rpc"
         mock_request.scope["path"] = "/_internal/mcp/rpc"
         mock_request.method = "POST"
-        mock_request.headers = {
-            "Authorization": "Bearer scoped-token",
-            "x-contextforge-mcp-runtime": "rust",
-            "x-contextforge-auth-context": "trusted-payload",
-        }
+        mock_request.headers = {"Authorization": "Bearer scoped-token", **_trusted_internal_runtime_headers()}
 
         call_next = AsyncMock(return_value="ok")
         with patch.object(middleware, "_extract_token_scopes", new=AsyncMock(side_effect=AssertionError("token scoping should be bypassed"))):
@@ -168,11 +176,7 @@ class TestTokenScopingMiddleware:
         mock_request.scope["path"] = "/_internal/mcp/rpc"
         mock_request.method = "POST"
         mock_request.client.host = "10.0.0.8"
-        mock_request.headers = {
-            "Authorization": "Bearer scoped-token",
-            "x-contextforge-mcp-runtime": "rust",
-            "x-contextforge-auth-context": "trusted-payload",
-        }
+        mock_request.headers = {"Authorization": "Bearer scoped-token", **_trusted_internal_runtime_headers()}
 
         payload = {"sub": "user@example.com", "scopes": {"permissions": ["tools.read"]}}
         with (
@@ -219,6 +223,7 @@ class TestTokenScopingMiddleware:
         mock_request.headers = {
             "Authorization": "Bearer scoped-token",
             "x-contextforge-mcp-runtime": "rust",
+            "x-contextforge-mcp-runtime-auth": _trusted_internal_runtime_headers()["x-contextforge-mcp-runtime-auth"],
         }
 
         with (

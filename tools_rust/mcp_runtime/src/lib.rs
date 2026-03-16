@@ -74,6 +74,9 @@ use crate::config::{ListenTarget, RuntimeConfig};
 const JSONRPC_VERSION: &str = "2.0";
 const RUNTIME_HEADER: &str = "x-contextforge-mcp-runtime";
 const RUNTIME_NAME: &str = "rust";
+const INTERNAL_RUNTIME_AUTH_HEADER: &str = "x-contextforge-mcp-runtime-auth";
+const INTERNAL_RUNTIME_AUTH_CONTEXT: &str = "contextforge-internal-mcp-runtime-v1";
+const DEFAULT_INTERNAL_RUNTIME_AUTH_SECRET: &str = "my-test-salt";
 const UPSTREAM_CLIENT_HEADER: &str = "x-contextforge-mcp-upstream-client";
 const MCP_PROTOCOL_VERSION_HEADER: &str = "mcp-protocol-version";
 const SESSION_VALIDATED_HEADER: &str = "x-contextforge-session-validated";
@@ -2207,6 +2210,7 @@ fn build_public_auth_headers(incoming_headers: &HeaderMap) -> HashMap<String, St
                 | RUNTIME_HEADER
                 | SESSION_VALIDATED_HEADER
                 | INTERNAL_AFFINITY_FORWARDED_HEADER
+                | INTERNAL_RUNTIME_AUTH_HEADER
                 | "x-contextforge-auth-context"
                 | "x-contextforge-server-id"
         ) {
@@ -2243,6 +2247,20 @@ fn public_client_ip(incoming_headers: &HeaderMap, peer_addr: Option<SocketAddr>)
         Some(peer_ip) => Some(peer_ip.to_string()),
         None => None,
     }
+}
+
+fn internal_runtime_auth_header_value() -> HeaderValue {
+    static HEADER_VALUE: OnceLock<HeaderValue> = OnceLock::new();
+    HEADER_VALUE
+        .get_or_init(|| {
+            let secret = std::env::var("AUTH_ENCRYPTION_SECRET")
+                .unwrap_or_else(|_| DEFAULT_INTERNAL_RUNTIME_AUTH_SECRET.to_string());
+            let digest =
+                Sha256::digest(format!("{secret}:{INTERNAL_RUNTIME_AUTH_CONTEXT}").as_bytes());
+            HeaderValue::from_str(&hex_encode(digest.as_ref()))
+                .expect("derived internal MCP runtime auth header must be valid")
+        })
+        .clone()
 }
 
 fn proxy_header_hop_is_trusted(ip: IpAddr) -> bool {
@@ -2429,6 +2447,10 @@ async fn authenticate_public_request_if_needed(
         .client
         .post(state.backend_authenticate_url())
         .header(RUNTIME_HEADER, RUNTIME_NAME)
+        .header(
+            HeaderName::from_static(INTERNAL_RUNTIME_AUTH_HEADER),
+            internal_runtime_auth_header_value(),
+        )
         .json(&request_body)
         .send()
         .await
@@ -7228,6 +7250,10 @@ fn build_forwarded_headers_with_session_validation(
         HeaderName::from_static(RUNTIME_HEADER),
         HeaderValue::from_static(RUNTIME_NAME),
     );
+    forwarded_headers.insert(
+        HeaderName::from_static(INTERNAL_RUNTIME_AUTH_HEADER),
+        internal_runtime_auth_header_value(),
+    );
     if session_validated {
         forwarded_headers.insert(
             HeaderName::from_static(SESSION_VALIDATED_HEADER),
@@ -7341,6 +7367,7 @@ fn should_forward_header(name: &HeaderName) -> bool {
             | "x-forwarded-internally"
             | "x-mcp-session-id"
             | INTERNAL_AFFINITY_FORWARDED_HEADER
+            | INTERNAL_RUNTIME_AUTH_HEADER
             | SESSION_VALIDATED_HEADER
             | RUNTIME_HEADER
     )
@@ -7445,6 +7472,7 @@ mod unit_tests {
         forward_initialize_to_backend, forward_to_backend, forward_transport_request,
         get_runtime_session, handle_initialize_with_session_core, handle_resume_transport_request,
         has_server_scope, hex_decode, hex_encode, inject_server_id_header, inject_session_header,
+        INTERNAL_RUNTIME_AUTH_HEADER, RUNTIME_HEADER, RUNTIME_NAME,
         invalid_request_response, is_affinity_forwarded_request, maybe_bind_session_auth_context,
         maybe_upsert_runtime_session_from_transport_response, normalize_postgres_database_url,
         parse_error_response, parse_sse_line, pool_owner_key, prompt_arguments_from_schema,
@@ -7466,6 +7494,7 @@ mod unit_tests {
     };
     use futures_util::stream;
     use reqwest::Url;
+    use std::collections::HashMap;
     use serde_json::{Value, json};
     use std::{
         convert::Infallible,
@@ -8094,12 +8123,26 @@ mod unit_tests {
         config.public_listen_http = Some(free_tcp_addr());
         let captured = Arc::new(Mutex::new(None::<InternalAuthenticateRequest>));
         let captured_auth = captured.clone();
+        let captured_request_headers = Arc::new(Mutex::new(None::<HashMap<String, String>>));
+        let captured_request_headers_auth = captured_request_headers.clone();
         let backend = Router::new().route(
             "/_internal/mcp/authenticate",
-            post(move |Json(request): Json<InternalAuthenticateRequest>| {
+            post(move |headers: HeaderMap, Json(request): Json<InternalAuthenticateRequest>| {
                 let captured_auth = captured_auth.clone();
+                let captured_request_headers_auth = captured_request_headers_auth.clone();
                 async move {
                     *captured_auth.lock().expect("lock") = Some(request);
+                    *captured_request_headers_auth.lock().expect("lock") = Some(
+                        headers
+                            .iter()
+                            .filter_map(|(name, value)| {
+                                value
+                                    .to_str()
+                                    .ok()
+                                    .map(|value| (name.as_str().to_string(), value.to_string()))
+                            })
+                            .collect(),
+                    );
                     Json(json!({
                         "authContext": {
                             "email": "trusted@example.com",
@@ -8161,9 +8204,20 @@ mod unit_tests {
             .expect("lock")
             .clone()
             .expect("captured request");
+        let captured_request_headers = captured_request_headers
+            .lock()
+            .expect("lock")
+            .clone()
+            .expect("captured request headers");
         assert!(!captured.headers.contains_key("x-contextforge-auth-context"));
+        assert!(!captured.headers.contains_key("x-contextforge-mcp-runtime-auth"));
         assert!(!captured.headers.contains_key("x-contextforge-server-id"));
         assert_eq!(captured.client_ip.as_deref(), Some("198.51.100.9"));
+        assert_eq!(
+            captured_request_headers.get(RUNTIME_HEADER).map(String::as_str),
+            Some(RUNTIME_NAME)
+        );
+        assert!(captured_request_headers.contains_key(INTERNAL_RUNTIME_AUTH_HEADER));
     }
 
     #[tokio::test]
