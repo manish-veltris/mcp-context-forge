@@ -528,7 +528,36 @@ Recommended next step:
 - Add explicit shutdown cleanup on the Rust side and a `close()`/shutdown hook
   for the Python proxy's cached UDS client in a separate follow-up.
 
-#### 19. Session-auth reuse still trades freshness for fewer auth round-trips
+#### 19. Redis hot-path round-trip and cache single-flight polish
+
+Status:
+- Deferred performance polish
+
+Observed behavior:
+- Runtime-session refresh in Redis still uses `GET` followed by `EXPIRE`
+  instead of a single `GETEX`-style refresh.
+- Event-store replay still fetches replay payloads one entry at a time from
+  the Redis hash instead of batching those lookups.
+- A few in-process caches still use simple double-checked locking rather than
+  a stronger single-flight pattern, so duplicate initialization work is still
+  possible under contention.
+
+Why this matters:
+- These are performance and efficiency opportunities, not current correctness
+  regressions.
+- They are most visible under heavy load or when many workers race to populate
+  the same hot cache entries.
+
+Likely area:
+- `tools_rust/mcp_runtime/src/lib.rs`
+
+Recommended next step:
+- Revisit the Redis/runtime hot paths in a focused performance pass and assess:
+  - `GETEX` or equivalent atomic session-touch semantics
+  - `HMGET`/pipeline replay fetches for event batches
+  - `OnceCell` or another single-flight pattern for expensive cache fills
+
+#### 20. Session-auth reuse still trades freshness for fewer auth round-trips
 
 Status:
 - Deferred Rust-specific design follow-up
@@ -552,7 +581,7 @@ Recommended next step:
   should consume a revocation/invalidation signal from Python to drop cached
   auth state immediately.
 
-#### 20. Legacy migration suites are still red
+#### 21. Legacy migration suites are still red
 
 Status:
 - Deferred broader release/upgrade follow-up
@@ -581,7 +610,7 @@ Recommended next step:
   fix the legacy migration/data-retention issues independently of the Rust MCP
   transport PR.
 
-#### 21. Live PostgreSQL TLS validation is still unexecuted
+#### 22. Live PostgreSQL TLS validation is still unexecuted
 
 Status:
 - Deferred release-validation follow-up
@@ -609,7 +638,7 @@ Recommended next step:
   - Rust with `sslrootcert=/path/to/ca.pem`
   - explicit failure for unsupported `sslcert` / `sslkey`
 
-#### 22. Minikube clean reinstall flow still looks unhealthy
+#### 23. Minikube clean reinstall flow still looks unhealthy
 
 Status:
 - Deferred Helm/deployment follow-up
@@ -635,7 +664,7 @@ Recommended next step:
   issue is in Helm invocation, namespace lifecycle timing, or local Minikube
   state.
 
-#### 23. Optional `2025-11-25-report` surface is not release-clean
+#### 24. Optional `2025-11-25-report` surface is not release-clean
 
 Status:
 - Deferred protocol-surface follow-up

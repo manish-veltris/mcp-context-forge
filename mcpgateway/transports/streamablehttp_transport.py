@@ -455,6 +455,7 @@ class RustEventStore(EventStore):
                 "ttlSeconds": self.ttl,
             },
             timeout=httpx.Timeout(settings.experimental_rust_mcp_runtime_timeout_seconds),
+            follow_redirects=False,
         )
         response.raise_for_status()
         payload = response.json()
@@ -481,6 +482,7 @@ class RustEventStore(EventStore):
                 "keyPrefix": self.key_prefix,
             },
             timeout=httpx.Timeout(settings.experimental_rust_mcp_runtime_timeout_seconds),
+            follow_redirects=False,
         )
         response.raise_for_status()
         payload = response.json()
@@ -515,7 +517,7 @@ async def _get_rust_event_store_client() -> httpx.AsyncClient:
                 transport=httpx.AsyncHTTPTransport(uds=uds_path),
                 limits=get_http_limits(),
                 timeout=httpx.Timeout(settings.experimental_rust_mcp_runtime_timeout_seconds),
-                follow_redirects=True,
+                follow_redirects=False,
             )
         return _rust_event_store_client
 

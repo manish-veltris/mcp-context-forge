@@ -66,11 +66,12 @@ async def test_post_requests_proxy_to_rust_runtime_and_forward_internal_server_h
             return False
 
     class FakeClient:
-        def stream(self, method, url, *, content, headers, timeout):  # noqa: ANN001
+        def stream(self, method, url, *, content, headers, timeout, follow_redirects):  # noqa: ANN001
             captured["method"] = method
             captured["url"] = url
             captured["headers"] = headers
             captured["timeout"] = timeout
+            captured["follow_redirects"] = follow_redirects
             return FakeStreamContext(content=content)
 
     monkeypatch.setattr("mcpgateway.transports.rust_mcp_runtime_proxy.settings.experimental_rust_mcp_runtime_url", "http://127.0.0.1:8787")
@@ -125,6 +126,7 @@ async def test_post_requests_proxy_to_rust_runtime_and_forward_internal_server_h
     assert captured["method"] == "POST"
     assert captured["url"] == "http://127.0.0.1:8787/mcp/?session_id=abc123"
     assert captured["timeout"].connect == 17
+    assert captured["follow_redirects"] is False
 
     forwarded_headers = dict(captured["headers"])
     assert forwarded_headers["authorization"] == "Bearer test-token"
@@ -188,11 +190,12 @@ async def test_post_requests_without_server_scope_stream_body_to_rust(monkeypatc
             return False
 
     class FakeClient:
-        def stream(self, method, url, *, content, headers, timeout):  # noqa: ANN001
+        def stream(self, method, url, *, content, headers, timeout, follow_redirects):  # noqa: ANN001
             captured["method"] = method
             captured["url"] = url
             captured["headers"] = headers
             captured["timeout"] = timeout
+            captured["follow_redirects"] = follow_redirects
             return FakeStreamContext(content=content)
 
     async def receive():
@@ -233,6 +236,7 @@ async def test_post_requests_without_server_scope_stream_body_to_rust(monkeypatc
     assert captured["method"] == "POST"
     assert captured["url"] == "http://127.0.0.1:8787/mcp/"
     assert captured["content"] == b'{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}'
+    assert captured["follow_redirects"] is False
     assert events[-1] == {"type": "http.response.body", "body": b"", "more_body": False}
 
 
@@ -257,11 +261,12 @@ async def test_loopback_internal_forward_marks_affinity_for_rust(monkeypatch):
             return False
 
     class FakeClient:
-        def stream(self, method, url, *, content, headers, timeout):  # noqa: ANN001
+        def stream(self, method, url, *, content, headers, timeout, follow_redirects):  # noqa: ANN001
             captured["method"] = method
             captured["url"] = url
             captured["headers"] = dict(headers)
             captured["timeout"] = timeout
+            captured["follow_redirects"] = follow_redirects
             return FakeStreamContext()
 
     monkeypatch.setattr("mcpgateway.transports.rust_mcp_runtime_proxy.settings.experimental_rust_mcp_runtime_url", "http://127.0.0.1:8787")
@@ -298,6 +303,7 @@ async def test_loopback_internal_forward_marks_affinity_for_rust(monkeypatch):
 
     assert captured["method"] == "GET"
     assert captured["url"] == "http://127.0.0.1:8787/mcp/?session_id=session-1"
+    assert captured["follow_redirects"] is False
     assert captured["headers"]["x-contextforge-affinity-forwarded"] == "rust"
     assert "x-forwarded-internally" not in captured["headers"]
     assert "x-original-worker" not in captured["headers"]
@@ -332,12 +338,13 @@ async def test_get_requests_proxy_to_rust_runtime(monkeypatch):
             return False
 
     class FakeClient:
-        def stream(self, method, url, *, content, headers, timeout):  # noqa: ANN001
+        def stream(self, method, url, *, content, headers, timeout, follow_redirects):  # noqa: ANN001
             captured["method"] = method
             captured["url"] = url
             captured["content"] = content
             captured["headers"] = headers
             captured["timeout"] = timeout
+            captured["follow_redirects"] = follow_redirects
             return FakeStreamContext()
 
     monkeypatch.setattr("mcpgateway.transports.rust_mcp_runtime_proxy.settings.experimental_rust_mcp_runtime_url", "http://127.0.0.1:8787")
@@ -371,6 +378,7 @@ async def test_get_requests_proxy_to_rust_runtime(monkeypatch):
     assert captured["method"] == "GET"
     assert captured["url"] == "http://127.0.0.1:8787/mcp/?session_id=abc123"
     assert captured["content"] == b""
+    assert captured["follow_redirects"] is False
     assert dict(captured["headers"])["x-contextforge-server-id"] == "123e4567-e89b-12d3-a456-426614174000"
     assert events[0]["status"] == 200
     assert (b"content-type", b"text/event-stream") in events[0]["headers"]
@@ -402,11 +410,12 @@ async def test_post_requests_use_uds_client_when_configured(monkeypatch):
         def __init__(self, **kwargs):
             constructed["kwargs"] = kwargs
 
-        def stream(self, method, url, *, content, headers, timeout):  # noqa: ANN001
+        def stream(self, method, url, *, content, headers, timeout, follow_redirects):  # noqa: ANN001
             constructed["method"] = method
             constructed["url"] = url
             constructed["headers"] = headers
             constructed["timeout"] = timeout
+            constructed["follow_redirects"] = follow_redirects
             return FakeStreamContext()
 
     get_http_client_mock = AsyncMock()
@@ -441,6 +450,57 @@ async def test_post_requests_use_uds_client_when_configured(monkeypatch):
     assert constructed["method"] == "POST"
     assert constructed["url"] == "http://localhost/mcp/"
     assert constructed["kwargs"]["transport"]._pool._uds == "/tmp/contextforge-mcp-rust.sock"  # pylint: disable=protected-access
+    assert constructed["kwargs"]["follow_redirects"] is False
+    assert constructed["follow_redirects"] is False
+    assert events[-1] == {"type": "http.response.body", "body": b"", "more_body": False}
+
+
+@pytest.mark.asyncio
+async def test_runtime_proxy_surfaces_redirect_without_following(monkeypatch):
+    """Internal runtime redirects should be surfaced directly and never auto-followed."""
+    requests_seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests_seen.append(str(request.url))
+        if request.url.path == "/mcp/":
+            return httpx.Response(
+                307,
+                headers={"location": "http://127.0.0.1:8787/final"},
+                request=request,
+            )
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {"unexpected": True}}, request=request)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    monkeypatch.setattr("mcpgateway.transports.rust_mcp_runtime_proxy.settings.experimental_rust_mcp_runtime_url", "http://127.0.0.1:8787")
+    monkeypatch.setattr("mcpgateway.transports.rust_mcp_runtime_proxy.get_http_client", AsyncMock(return_value=client))
+
+    fallback = AsyncMock()
+    proxy = RustMCPRuntimeProxy(fallback)
+    events = []
+
+    async def send(message):
+        events.append(message)
+
+    try:
+        await proxy.handle_streamable_http(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": "/",
+                "modified_path": "/mcp",
+                "query_string": b"session_id=abc123",
+                "headers": [],
+            },
+            _make_receive(b""),
+            send,
+        )
+    finally:
+        await client.aclose()
+
+    fallback.assert_not_awaited()
+    assert requests_seen == ["http://127.0.0.1:8787/mcp/?session_id=abc123"]
+    assert events[0]["status"] == 307
+    assert (b"location", b"http://127.0.0.1:8787/final") in events[0]["headers"]
     assert events[-1] == {"type": "http.response.body", "body": b"", "more_body": False}
 
 

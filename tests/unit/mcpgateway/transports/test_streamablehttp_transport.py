@@ -168,8 +168,8 @@ async def test_rust_event_store_store_and_replay(monkeypatch):
             return self._payload
 
     class FakeClient:
-        async def post(self, url, json=None, timeout=None):  # noqa: A002
-            captured_requests.append((url, json, timeout.read))
+        async def post(self, url, json=None, timeout=None, follow_redirects=None):  # noqa: A002
+            captured_requests.append((url, json, timeout.read, follow_redirects))
             if url.endswith("/store"):
                 return FakeResponse({"eventId": "event-123"})
             return FakeResponse(
@@ -208,11 +208,43 @@ async def test_rust_event_store_store_and_replay(monkeypatch):
         "ttlSeconds": 321,
     }
     assert captured_requests[0][2] == 17
+    assert captured_requests[0][3] is False
     assert captured_requests[1][0] == "http://127.0.0.1:8787/_internal/event-store/replay"
     assert captured_requests[1][1] == {
         "lastEventId": "event-123",
         "keyPrefix": "mcpgw:eventstore:test",
     }
+    assert captured_requests[1][3] is False
+
+
+@pytest.mark.asyncio
+async def test_rust_event_store_replay_rejects_redirects_without_following(monkeypatch):
+    """Replay requests should fail closed on redirects from the Rust sidecar."""
+    requests_seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests_seen.append(str(request.url))
+        if request.url.path.endswith("/replay"):
+            return httpx.Response(
+                307,
+                headers={"location": "http://127.0.0.1:8787/final"},
+                request=request,
+            )
+        return httpx.Response(200, json={"streamId": "unexpected", "events": []}, request=request)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(tr, "_get_rust_event_store_client", AsyncMock(return_value=client))
+    monkeypatch.setattr(tr.settings, "experimental_rust_mcp_runtime_url", "http://127.0.0.1:8787")
+
+    store = tr.RustEventStore()
+
+    try:
+        with pytest.raises(httpx.HTTPStatusError, match="307 Temporary Redirect"):
+            await store.replay_events_after("event-123", AsyncMock())
+    finally:
+        await client.aclose()
+
+    assert requests_seen == ["http://127.0.0.1:8787/_internal/event-store/replay"]
 
 
 @pytest.mark.asyncio
@@ -290,11 +322,12 @@ async def test_get_rust_event_store_client_uses_shared_http_client_without_uds(m
 @pytest.mark.asyncio
 async def test_get_rust_event_store_client_reuses_uds_client(monkeypatch):
     """UDS-backed Rust event-store client should be created once and then reused."""
-    constructed = {"count": 0}
+    constructed = {"count": 0, "kwargs": None}
 
     class FakeAsyncClient:
         def __init__(self, **_kwargs):
             constructed["count"] += 1
+            constructed["kwargs"] = _kwargs
 
     monkeypatch.setattr(tr, "_rust_event_store_client", None)
     monkeypatch.setattr(tr.settings, "experimental_rust_mcp_runtime_uds", "/tmp/contextforge-mcp-rust.sock")
@@ -305,6 +338,7 @@ async def test_get_rust_event_store_client_reuses_uds_client(monkeypatch):
 
     assert first is second
     assert constructed["count"] == 1
+    assert constructed["kwargs"]["follow_redirects"] is False
 
 
 def test_get_streamable_http_auth_context_returns_empty_for_non_dict_context():

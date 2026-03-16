@@ -3446,8 +3446,19 @@ async fn replay_events_from_rust_event_store(
             continue;
         };
 
-        let message = serde_json::from_str::<Value>(&message_json).unwrap_or(Value::Null);
-        events.push(EventStoreReplayEvent { event_id, message });
+        match serde_json::from_str::<Value>(&message_json) {
+            Ok(message) => events.push(EventStoreReplayEvent { event_id, message }),
+            Err(err) => {
+                error!(
+                    "Rust event store replay decode failed for stream {} event {}: {err}",
+                    index_record.stream_id, event_id
+                );
+                return Err(json_response(
+                    StatusCode::BAD_GATEWAY,
+                    json!({"detail": "Rust event store replay decode failed"}),
+                ));
+            }
+        }
     }
 
     Ok(EventStoreReplayResponse {

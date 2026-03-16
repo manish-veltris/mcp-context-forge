@@ -2097,6 +2097,87 @@ async fn rust_event_store_replays_events_across_runtime_instances() {
 }
 
 #[tokio::test]
+async fn rust_event_store_replay_fails_closed_on_corrupt_messages() {
+    let redis_url = "redis://127.0.0.1:6379/0";
+    if !redis_is_available(redis_url).await {
+        return;
+    }
+
+    let cache_prefix = format!("mcpgw:rust-eventstore-corrupt-itest:{}:", Uuid::new_v4());
+    cleanup_redis_prefix(redis_url, &cache_prefix).await;
+
+    let runtime = build_router(
+        AppState::new(&RuntimeConfig {
+            redis_url: Some(redis_url.to_string()),
+            event_store_enabled: true,
+            cache_prefix: cache_prefix.clone(),
+            ..test_runtime_config()
+        })
+        .expect("state"),
+    );
+    let runtime_url = spawn_router(runtime).await;
+    let client = reqwest::Client::new();
+
+    let first = client
+        .post(format!("{runtime_url}/_internal/event-store/store"))
+        .json(&json!({
+            "streamId": "stream-1",
+            "message": {"id": 1},
+        }))
+        .send()
+        .await
+        .expect("store first");
+    let first_body: Value = first.json().await.expect("first json");
+    let first_event_id = first_body["eventId"]
+        .as_str()
+        .expect("first event id")
+        .to_string();
+
+    let second = client
+        .post(format!("{runtime_url}/_internal/event-store/store"))
+        .json(&json!({
+            "streamId": "stream-1",
+            "message": {"id": 2},
+        }))
+        .send()
+        .await
+        .expect("store second");
+    let second_body: Value = second.json().await.expect("second json");
+    let second_event_id = second_body["eventId"]
+        .as_str()
+        .expect("second event id")
+        .to_string();
+
+    let redis_client = redis::Client::open(redis_url).expect("redis client");
+    let mut redis = redis_client
+        .get_multiplexed_async_connection()
+        .await
+        .expect("redis connection");
+    redis
+        .hset::<_, _, _, ()>(
+            format!("{cache_prefix}eventstore:stream-1:messages"),
+            second_event_id,
+            "{not-json",
+        )
+        .await
+        .expect("corrupt stored payload");
+
+    let replay = client
+        .post(format!("{runtime_url}/_internal/event-store/replay"))
+        .json(&json!({
+            "lastEventId": first_event_id,
+        }))
+        .send()
+        .await
+        .expect("replay response");
+    assert_eq!(replay.status(), StatusCode::BAD_GATEWAY);
+    let replay_body: Value = replay.json().await.expect("replay json");
+    assert_eq!(replay_body, json!({"detail": "Rust event store replay decode failed"}));
+
+    cleanup_redis_prefix(redis_url, &cache_prefix).await;
+}
+
+#[tokio::test]
 async fn resume_core_replays_public_get_from_rust_event_store() {
     let redis_url = "redis://127.0.0.1:6379/0";
     if !redis_is_available(redis_url).await {

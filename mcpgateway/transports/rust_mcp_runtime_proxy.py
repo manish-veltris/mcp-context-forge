@@ -96,6 +96,7 @@ class RustMCPRuntimeProxy:
                 content=_stream_request_body(receive) if method == "POST" else b"",
                 headers=headers,
                 timeout=timeout,
+                follow_redirects=False,
             ) as response:
                 await send(
                     {
@@ -144,7 +145,7 @@ class RustMCPRuntimeProxy:
                     transport=httpx.AsyncHTTPTransport(uds=uds_path),
                     limits=get_http_limits(),
                     timeout=httpx.Timeout(settings.experimental_rust_mcp_runtime_timeout_seconds),
-                    follow_redirects=True,
+                    follow_redirects=False,
                 )
             return self._uds_client
 
