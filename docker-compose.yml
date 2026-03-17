@@ -394,6 +394,8 @@ services:
       # Uncomment to enable plugins
       - PLUGINS_ENABLED=true
       - PLUGINS_CONFIG_FILE=${PLUGINS_CONFIG_FILE:-plugins/config.yaml}
+      - PLUGINS_CAN_OVERRIDE_AUTH_HEADERS=${PLUGINS_CAN_OVERRIDE_AUTH_HEADERS:-false}
+      - STREAMABLE_HTTP_MAX_EVENTS_PER_STREAM=${STREAMABLE_HTTP_MAX_EVENTS_PER_STREAM:-100}
       # Uncomment to enable catalog
       - MCPGATEWAY_CATALOG_ENABLED=true
       - MCPGATEWAY_CATALOG_FILE=/app/mcp-catalog.yml
@@ -466,8 +468,8 @@ services:
       # ═══════════════════════════════════════════════════════════════════════════
       # Shared HTTP client for all outbound requests (federation, health checks,
       # A2A, SSO, catalog). Provides ~20x better performance than per-request clients.
-      - HTTPX_MAX_CONNECTIONS=500           # Total connections in pool (increased from 200 for high concurrency)
-      - HTTPX_MAX_KEEPALIVE_CONNECTIONS=300 # Keepalive connections (increased from 100)
+      - HTTPX_MAX_CONNECTIONS=${HTTPX_MAX_CONNECTIONS:-500}           # Total connections in pool
+      - HTTPX_MAX_KEEPALIVE_CONNECTIONS=${HTTPX_MAX_KEEPALIVE_CONNECTIONS:-300} # Keepalive connections
       - HTTPX_KEEPALIVE_EXPIRY=30.0         # Idle connection expiry (seconds)
       - HTTPX_CONNECT_TIMEOUT=5.0           # TCP connection timeout (seconds)
       - HTTPX_READ_TIMEOUT=120.0            # Response read timeout (seconds, high for slow tools)
@@ -2202,6 +2204,7 @@ services:
       - LOCUST_USERS=${LOCUST_USERS:-100}
       - LOCUST_SPAWN_RATE=${LOCUST_SPAWN_RATE:-10}
       - LOCUST_RUN_TIME=${LOCUST_RUN_TIME:-5m}
+      - LOCUST_WXO_AUTH_ENABLED=${LOCUST_WXO_AUTH_ENABLED:-true}
     deploy:
       resources:
         limits:
@@ -2238,6 +2241,7 @@ services:
     environment:
       - HOME=/tmp
       - LOCUST_LOCUSTFILE=${LOCUST_LOCUSTFILE:-locustfile.py}
+      - LOCUST_WXO_AUTH_ENABLED=${LOCUST_WXO_AUTH_ENABLED:-true}
     deploy:
       resources:
         limits:
