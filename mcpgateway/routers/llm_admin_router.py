@@ -21,9 +21,12 @@ from sqlalchemy.orm import Session
 from mcpgateway.db import LLMProviderType
 from mcpgateway.middleware.rbac import get_current_user_with_permissions, get_db, require_permission
 from mcpgateway.services.llm_provider_service import (
+    build_portkey_headers,
+    get_portkey_api_base,
     LLMModelNotFoundError,
     LLMProviderNotFoundError,
     LLMProviderService,
+    should_use_portkey_for_model_discovery,
 )
 from mcpgateway.services.logging_service import LoggingService
 
@@ -703,7 +706,8 @@ async def fetch_provider_models(
         }
 
     # Build API URL
-    base_url = provider.api_base or provider_config.get("api_base", "")
+    use_portkey = should_use_portkey_for_model_discovery(provider)
+    base_url = get_portkey_api_base(provider) if use_portkey else (provider.api_base or provider_config.get("api_base", ""))
     if not base_url:
         return {
             "success": False,
@@ -716,7 +720,9 @@ async def fetch_provider_models(
 
     # Get API key if needed
     headers = {"Content-Type": "application/json"}
-    if provider.api_key:
+    if provider.provider_type == LLMProviderType.PORTKEY or use_portkey:
+        headers = build_portkey_headers(provider, include_content_type=True)
+    elif provider.api_key:
         auth_data = decode_auth(provider.api_key)
         api_key = auth_data.get("api_key")
         if api_key:

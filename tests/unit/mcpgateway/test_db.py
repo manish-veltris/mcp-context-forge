@@ -2821,9 +2821,11 @@ def test_get_for_update_where_and_options_paths():
 def test_llm_provider_type_helpers():
     types_ = db.LLMProviderType.get_all_types()
     assert db.LLMProviderType.OPENAI in types_
+    assert db.LLMProviderType.PORTKEY in types_
 
     defaults = db.LLMProviderType.get_provider_defaults()
     assert "api_base" in defaults[db.LLMProviderType.OPENAI]
+    assert defaults[db.LLMProviderType.PORTKEY]["supports_model_list"] is True
 
 
 def test_slug_listeners_gateway_a2a_agent_email_team(monkeypatch):
