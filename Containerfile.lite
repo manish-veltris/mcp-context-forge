@@ -45,11 +45,15 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # Only build if ENABLE_RUST=true
 RUN if [ "$ENABLE_RUST" != "true" ]; then \
         echo "⏭️  Rust builds disabled (set --build-arg ENABLE_RUST=true to enable)"; \
-        mkdir -p /build/rust-wheels /build/tools_rust/mcp_runtime/target/release; \
+        mkdir -p /build/rust-wheels /build/tools_rust/mcp_runtime/target/release /build/tools_rust/a2a_runtime/target/release; \
         printf '#!/usr/bin/env sh\n' > /build/tools_rust/mcp_runtime/target/release/contextforge-mcp-runtime; \
         printf 'echo "Rust MCP runtime not built into this image. Rebuild with --build-arg ENABLE_RUST=true." >&2\n' >> /build/tools_rust/mcp_runtime/target/release/contextforge-mcp-runtime; \
         printf 'exit 1\n' >> /build/tools_rust/mcp_runtime/target/release/contextforge-mcp-runtime; \
         chmod +x /build/tools_rust/mcp_runtime/target/release/contextforge-mcp-runtime; \
+        printf '#!/usr/bin/env sh\n' > /build/tools_rust/a2a_runtime/target/release/contextforge-a2a-runtime; \
+        printf 'echo "Rust A2A runtime not built into this image. Rebuild with --build-arg ENABLE_RUST=true." >&2\n' >> /build/tools_rust/a2a_runtime/target/release/contextforge-a2a-runtime; \
+        printf 'exit 1\n' >> /build/tools_rust/a2a_runtime/target/release/contextforge-a2a-runtime; \
+        chmod +x /build/tools_rust/a2a_runtime/target/release/contextforge-a2a-runtime; \
         exit 0; \
     fi
 
@@ -64,6 +68,7 @@ WORKDIR /build
 # Copy only Rust plugin/runtime files (only if ENABLE_RUST=true)
 COPY plugins_rust/ /build/plugins_rust/
 COPY tools_rust/mcp_runtime/ /build/tools_rust/mcp_runtime/
+COPY tools_rust/a2a_runtime/ /build/tools_rust/a2a_runtime/
 
 # Build each Rust plugin independently using Python 3.12 from manylinux image
 RUN if [ "$ENABLE_RUST" = "true" ]; then \
@@ -94,6 +99,17 @@ RUN if [ "$ENABLE_RUST" = "true" ]; then \
         echo "✅ Rust MCP runtime built successfully"; \
     else \
         echo "⏭️  Skipping Rust MCP runtime build"; \
+    fi
+
+WORKDIR /build/tools_rust/a2a_runtime
+
+# Build the experimental Rust A2A runtime binary (only if ENABLE_RUST=true)
+RUN if [ "$ENABLE_RUST" = "true" ]; then \
+        cargo build --release && \
+        cp target/release/contextforge_a2a_runtime target/release/contextforge-a2a-runtime && \
+        echo "✅ Rust A2A runtime built successfully"; \
+    else \
+        echo "⏭️  Skipping Rust A2A runtime build"; \
     fi
 
 FROM rust-builder-base AS rust-builder
@@ -150,6 +166,7 @@ COPY pyproject.toml /app/
 # ----------------------------------------------------------------------------
 COPY --from=rust-builder /build/rust-wheels/ /tmp/rust-wheels/
 COPY --from=rust-builder /build/tools_rust/mcp_runtime/target/release/contextforge-mcp-runtime /app/bin/contextforge-mcp-runtime
+COPY --from=rust-builder /build/tools_rust/a2a_runtime/target/release/contextforge-a2a-runtime /app/bin/contextforge-a2a-runtime
 
 # ----------------------------------------------------------------------------
 # Create and populate virtual environment

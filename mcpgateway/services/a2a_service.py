@@ -25,13 +25,16 @@ from sqlalchemy.orm import Session
 
 # First-Party
 from mcpgateway.cache.a2a_stats_cache import a2a_stats_cache
+from mcpgateway.config import settings
 from mcpgateway.db import A2AAgent as DbA2AAgent
 from mcpgateway.db import A2AAgentMetric, A2AAgentMetricsHourly, EmailTeam, fresh_db_session, get_for_update
 from mcpgateway.schemas import A2AAgentAggregateMetrics, A2AAgentCreate, A2AAgentMetrics, A2AAgentRead, A2AAgentUpdate
+from mcpgateway.services.a2a_protocol import prepare_a2a_invocation
 from mcpgateway.services.base_service import BaseService
 from mcpgateway.services.encryption_service import protect_oauth_config_for_storage
 from mcpgateway.services.logging_service import LoggingService
 from mcpgateway.services.metrics_cleanup_service import delete_metrics_in_batches, pause_rollup_during_purge
+from mcpgateway.services.rust_a2a_runtime import RustA2ARuntimeError, get_rust_a2a_runtime_client
 from mcpgateway.services.structured_logger import get_structured_logger
 from mcpgateway.services.team_management_service import TeamManagementService
 from mcpgateway.utils.correlation_id import get_correlation_id
@@ -1339,35 +1342,6 @@ class A2AAgentService(BaseService):
         agent_auth_value = agent.auth_value
         agent_auth_query_params = agent.auth_query_params
 
-        # Handle query_param auth - decrypt and apply to URL
-        auth_query_params_decrypted: Optional[Dict[str, str]] = None
-        if agent_auth_type == "query_param" and agent_auth_query_params:
-            # First-Party
-            from mcpgateway.utils.url_auth import apply_query_param_auth  # pylint: disable=import-outside-toplevel
-
-            auth_query_params_decrypted = {}
-            for param_key, encrypted_value in agent_auth_query_params.items():
-                if encrypted_value:
-                    try:
-                        decrypted = decode_auth(encrypted_value)
-                        auth_query_params_decrypted[param_key] = decrypted.get(param_key, "")
-                    except Exception:
-                        logger.debug(f"Failed to decrypt query param '{param_key}' for A2A agent invocation")
-            if auth_query_params_decrypted:
-                agent_endpoint_url = apply_query_param_auth(agent_endpoint_url, auth_query_params_decrypted)
-
-        # Decode auth_value for supported auth types (before closing session)
-        auth_headers = {}
-        if agent_auth_type in ("basic", "bearer", "authheaders") and agent_auth_value:
-            # Decrypt auth_value and extract headers (follows gateway_service pattern)
-            if isinstance(agent_auth_value, str):
-                try:
-                    auth_headers = decode_auth(agent_auth_value)
-                except Exception as e:
-                    raise A2AAgentError(f"Failed to decrypt authentication for agent '{agent_name}': {e}")
-            elif isinstance(agent_auth_value, dict):
-                auth_headers = {str(k): str(v) for k, v in agent_auth_value.items()}
-
         # ═══════════════════════════════════════════════════════════════════════════
         # CRITICAL: Release DB connection back to pool BEFORE making HTTP calls
         # This prevents connection pool exhaustion during slow upstream requests.
@@ -1384,37 +1358,28 @@ class A2AAgentService(BaseService):
         # PHASE 2: Make HTTP call (no DB connection held)
         # ═══════════════════════════════════════════════════════════════════════════
 
-        # Create sanitized URL for logging (redacts auth query params)
         # First-Party
-        from mcpgateway.utils.url_auth import sanitize_exception_message, sanitize_url_for_logging  # pylint: disable=import-outside-toplevel
+        from mcpgateway.utils.url_auth import sanitize_exception_message  # pylint: disable=import-outside-toplevel
 
-        sanitized_endpoint_url = sanitize_url_for_logging(agent_endpoint_url, auth_query_params_decrypted)
+        correlation_id = get_correlation_id()
+        try:
+            prepared = prepare_a2a_invocation(
+                agent_type=agent_type,
+                endpoint_url=agent_endpoint_url,
+                protocol_version=agent_protocol_version,
+                parameters=parameters,
+                interaction_type=interaction_type,
+                auth_type=agent_auth_type,
+                auth_value=agent_auth_value,
+                auth_query_params=agent_auth_query_params,
+                correlation_id=correlation_id,
+            )
+        except Exception as e:
+            if agent_auth_type in ("basic", "bearer", "authheaders") and agent_auth_value:
+                raise A2AAgentError(f"Failed to decrypt authentication for agent '{agent_name}': {e}") from e
+            raise A2AAgentError(f"Failed to prepare A2A invocation for agent '{agent_name}': {e}") from e
 
         try:
-            # Prepare the request to the A2A agent
-            # Format request based on agent type and endpoint
-            if agent_type in ["generic", "jsonrpc"] or agent_endpoint_url.endswith("/"):
-                # Use JSONRPC format for agents that expect it
-                request_data = {"jsonrpc": "2.0", "method": parameters.get("method", "message/send"), "params": parameters.get("params", parameters), "id": 1}
-            else:
-                # Use custom A2A format
-                request_data = {"interaction_type": interaction_type, "parameters": parameters, "protocol_version": agent_protocol_version}
-
-            # Make HTTP request to the agent endpoint using shared HTTP client
-            # First-Party
-            from mcpgateway.services.http_client_service import get_http_client  # pylint: disable=import-outside-toplevel
-
-            client = await get_http_client()
-            headers = {"Content-Type": "application/json"}
-
-            # Add authentication if configured (using decoded auth headers)
-            headers.update(auth_headers)
-
-            # Add correlation ID to outbound headers for distributed tracing
-            correlation_id = get_correlation_id()
-            if correlation_id:
-                headers["X-Correlation-ID"] = correlation_id
-
             # Log A2A external call start (with sanitized URL to prevent credential leakage)
             call_start_time = datetime.now(timezone.utc)
             structured_logger.log(
@@ -1428,20 +1393,37 @@ class A2AAgentService(BaseService):
                     "event": "a2a_call_started",
                     "agent_name": agent_name,
                     "agent_id": agent_id,
-                    "endpoint_url": sanitized_endpoint_url,
+                    "endpoint_url": prepared.sanitized_endpoint_url,
                     "interaction_type": interaction_type,
                     "protocol_version": agent_protocol_version,
+                    "runtime": "rust" if settings.experimental_rust_a2a_runtime_enabled and settings.experimental_rust_a2a_runtime_delegate_enabled else "python",
                 },
             )
 
-            http_response = await client.post(agent_endpoint_url, json=request_data, headers=headers)
-            call_duration_ms = (datetime.now(timezone.utc) - call_start_time).total_seconds() * 1000
+            if settings.experimental_rust_a2a_runtime_enabled and settings.experimental_rust_a2a_runtime_delegate_enabled:
+                runtime_response = await get_rust_a2a_runtime_client().invoke(
+                    prepared,
+                    timeout_seconds=int(settings.mcpgateway_a2a_default_timeout),
+                )
+                status_code = int(runtime_response.get("status_code", 200))
+                response_json = runtime_response.get("json")
+                response_text = str(runtime_response.get("text") or "")
+            else:
+                # Make HTTP request to the agent endpoint using shared HTTP client
+                # First-Party
+                from mcpgateway.services.http_client_service import get_http_client  # pylint: disable=import-outside-toplevel
 
-            if http_response.status_code == 200:
-                response = http_response.json()
+                client = await get_http_client()
+                http_response = await client.post(prepared.endpoint_url, json=prepared.request_data, headers=prepared.headers)
+                status_code = http_response.status_code
+                response_json = http_response.json() if status_code == 200 else None
+                response_text = http_response.text
+
+            call_duration_ms = (datetime.now(timezone.utc) - call_start_time).total_seconds() * 1000
+            if status_code == 200:
+                response = response_json if response_json is not None else {"response": response_text}
                 success = True
 
-                # Log successful A2A call
                 structured_logger.log(
                     level="INFO",
                     message=f"A2A external call completed: {agent_name}",
@@ -1450,14 +1432,11 @@ class A2AAgentService(BaseService):
                     user_email=user_email,
                     correlation_id=correlation_id,
                     duration_ms=call_duration_ms,
-                    metadata={"event": "a2a_call_completed", "agent_name": agent_name, "agent_id": agent_id, "status_code": http_response.status_code, "success": True},
+                    metadata={"event": "a2a_call_completed", "agent_name": agent_name, "agent_id": agent_id, "status_code": status_code, "success": True},
                 )
             else:
-                # Sanitize error message to prevent URL secrets from leaking in logs
-                raw_error = f"HTTP {http_response.status_code}: {http_response.text}"
-                error_message = sanitize_exception_message(raw_error, auth_query_params_decrypted)
-
-                # Log failed A2A call
+                raw_error = f"HTTP {status_code}: {response_text}"
+                error_message = sanitize_exception_message(raw_error, None)
                 structured_logger.log(
                     level="ERROR",
                     message=f"A2A external call failed: {agent_name}",
@@ -1467,17 +1446,18 @@ class A2AAgentService(BaseService):
                     correlation_id=correlation_id,
                     duration_ms=call_duration_ms,
                     error_details={"error_type": "A2AHTTPError", "error_message": error_message},
-                    metadata={"event": "a2a_call_failed", "agent_name": agent_name, "agent_id": agent_id, "status_code": http_response.status_code},
+                    metadata={"event": "a2a_call_failed", "agent_name": agent_name, "agent_id": agent_id, "status_code": status_code},
                 )
-
                 raise A2AAgentError(error_message)
-
         except A2AAgentError:
             # Re-raise A2AAgentError without wrapping
             raise
+        except RustA2ARuntimeError as e:
+            error_message = sanitize_exception_message(str(e), None)
+            logger.error(f"Rust A2A runtime failed for agent '{agent_name}': {error_message}")
+            raise A2AAgentError(f"Failed to invoke A2A agent: {error_message}") from e
         except Exception as e:
-            # Sanitize error message to prevent URL secrets from leaking in logs
-            error_message = sanitize_exception_message(str(e), auth_query_params_decrypted)
+            error_message = sanitize_exception_message(str(e), None)
             logger.error(f"Failed to invoke A2A agent '{agent_name}': {error_message}")
             raise A2AAgentError(f"Failed to invoke A2A agent: {error_message}")
 
