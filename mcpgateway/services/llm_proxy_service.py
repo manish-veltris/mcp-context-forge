@@ -30,6 +30,7 @@ from mcpgateway.llm_schemas import (
     ChatCompletionRequest,
     ChatCompletionResponse,
     ChatMessage,
+    ResolvedChatCompletionTarget,
     UsageStats,
 )
 from mcpgateway.services.llm_provider_service import (
@@ -43,6 +44,16 @@ from mcpgateway.utils.services_auth import decode_auth
 # Initialize logging
 logging_service = LoggingService()
 logger = logging_service.get_logger(__name__)
+
+RUST_LLM_GATEWAY_SUPPORTED_PROVIDER_TYPES = frozenset(
+    {
+        LLMProviderType.OPENAI,
+        LLMProviderType.OPENAI_COMPATIBLE,
+        LLMProviderType.AZURE_OPENAI,
+        LLMProviderType.ANTHROPIC,
+        LLMProviderType.OLLAMA,
+    }
+)
 
 
 class LLMProxyError(Exception):
@@ -156,6 +167,23 @@ class LLMProxyService:
         except Exception as e:
             logger.error(f"Failed to decode API key for provider {provider.name}: {e}")
             return None
+
+    def supports_experimental_rust_gateway(
+        self,
+        db: Session,
+        model_id: str,
+    ) -> bool:
+        """Return whether a model can be delegated to the Rust LLM Gateway.
+
+        Args:
+            db: Database session.
+            model_id: Requested model identifier.
+
+        Returns:
+            ``True`` when the model provider is supported by the Rust runtime.
+        """
+        provider, _model = self._resolve_model(db, model_id)
+        return provider.provider_type in RUST_LLM_GATEWAY_SUPPORTED_PROVIDER_TYPES
 
     def _build_openai_request(
         self,
@@ -395,6 +423,89 @@ class LLMProxyService:
                 body["options"] = options
 
         return url, headers, body
+
+    def resolve_chat_completion_target(
+        self,
+        db: Session,
+        model_id: str,
+    ) -> ResolvedChatCompletionTarget:
+        """Resolve a model to a validated upstream chat target for trusted runtimes.
+
+        Args:
+            db: Database session.
+            model_id: Model identifier, alias, or UUID.
+
+        Returns:
+            Runtime target metadata used by the Rust LLM Gateway module.
+
+        Raises:
+            LLMModelNotFoundError: If the model does not exist or is disabled.
+            LLMProviderNotFoundError: If the provider does not exist or is disabled.
+            LLMProxyRequestError: If the resolved provider URL is unsafe or invalid.
+        """
+        provider, model = self._resolve_model(db, model_id)
+        api_key = self._get_api_key(provider)
+        runtime_kind = "openai"
+
+        if provider.provider_type not in RUST_LLM_GATEWAY_SUPPORTED_PROVIDER_TYPES:
+            raise LLMProxyRequestError(f"Provider type '{provider.provider_type}' is not supported by the experimental Rust LLM Gateway")
+
+        if provider.provider_type == LLMProviderType.AZURE_OPENAI:
+            provider_config = decrypt_provider_config_for_runtime(provider.config)
+            deployment_name = provider_config.get("deployment_name") or provider_config.get("deployment") or model.model_id
+            resource_name = provider_config.get("resource_name", "")
+            api_version = provider_config.get("api_version") or provider.api_version or "2024-02-15-preview"
+            if not provider.api_base and resource_name:
+                base_url = f"https://{resource_name}.openai.azure.com"
+            else:
+                base_url = provider.api_base or ""
+            url = f"{base_url.rstrip('/')}/openai/deployments/{deployment_name}/chat/completions?api-version={api_version}"
+            headers = {
+                "Content-Type": "application/json",
+                "api-key": api_key or "",
+            }
+            runtime_kind = "azure_openai"
+        elif provider.provider_type == LLMProviderType.ANTHROPIC:
+            provider_config = decrypt_provider_config_for_runtime(provider.config)
+            anthropic_version = provider_config.get("anthropic_version") or provider.api_version or "2023-06-01"
+            base_url = provider.api_base or "https://api.anthropic.com"
+            url = f"{base_url.rstrip('/')}/v1/messages"
+            headers = {
+                "Content-Type": "application/json",
+                "x-api-key": api_key or "",
+                "anthropic-version": anthropic_version,
+            }
+            runtime_kind = "anthropic"
+        elif provider.provider_type == LLMProviderType.OLLAMA:
+            base_url = (provider.api_base or "http://localhost:11434").rstrip("/")
+            if base_url.endswith("/v1"):
+                url = f"{base_url}/chat/completions"
+                headers = {"Content-Type": "application/json"}
+                runtime_kind = "ollama_openai"
+            else:
+                url = f"{base_url}/api/chat"
+                headers = {"Content-Type": "application/json"}
+                runtime_kind = "ollama_native"
+        else:
+            base_url = provider.api_base or "https://api.openai.com/v1"
+            url = f"{base_url.rstrip('/')}/chat/completions"
+            headers = {"Content-Type": "application/json"}
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+
+        try:
+            SecurityValidator.validate_url(url, "LLM provider URL")
+        except ValueError as url_err:
+            raise LLMProxyRequestError(f"Invalid LLM provider URL: {url_err}") from url_err
+
+        return ResolvedChatCompletionTarget(
+            runtime_kind=runtime_kind,
+            upstream_url=url,
+            upstream_headers=headers,
+            model_id=model.model_id,
+            default_temperature=provider.default_temperature,
+            default_max_tokens=provider.default_max_tokens,
+        )
 
     async def chat_completion(
         self,

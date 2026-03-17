@@ -1,0 +1,24 @@
+[package]
+name = "llm_gateway"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+async-stream = "0.3.6"
+axum = "0.8.6"
+bytes = "1.11.0"
+futures = "0.3.31"
+reqwest = { version = "0.13.1", default-features = false, features = ["rustls", "json", "stream", "http2"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+tokio = { version = "1.49.0", features = ["full"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+uuid = { version = "1.18.1", features = ["v4"] }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = 3
+panic = "abort"

@@ -55,8 +55,9 @@ ENV PATH="/root/.cargo/bin:$PATH"
 
 WORKDIR /build
 
-# Copy only Rust plugin files (only if ENABLE_RUST=true)
+# Copy only Rust plugin/module files (only if ENABLE_RUST=true)
 COPY plugins_rust/ /build/plugins_rust/
+COPY tools_rust/llm_gateway/ /build/tools_rust/llm_gateway/
 
 # Build each Rust plugin independently using Python 3.12 from manylinux image
 RUN if [ "$ENABLE_RUST" = "true" ]; then \
@@ -72,6 +73,17 @@ RUN if [ "$ENABLE_RUST" = "true" ]; then \
         echo "✅ Rust plugins built successfully"; \
     else \
         echo "⏭️  Skipping Rust plugin build"; \
+    fi
+
+RUN if [ "$ENABLE_RUST" = "true" ]; then \
+        mkdir -p /build/rust-bin && \
+        echo "🦀 Building Rust LLM Gateway sidecar..." && \
+        (cd /build/tools_rust/llm_gateway && cargo build --release) && \
+        cp /build/tools_rust/llm_gateway/target/release/llm_gateway /build/rust-bin/llm_gateway && \
+        echo "✅ Rust LLM Gateway sidecar built successfully"; \
+    else \
+        echo "⏭️  Skipping Rust LLM Gateway sidecar build"; \
+        mkdir -p /build/rust-bin; \
     fi
 
 FROM rust-builder-base AS rust-builder
@@ -127,6 +139,7 @@ COPY pyproject.toml /app/
 # Copy Rust plugin wheels from rust-builder stage (if any exist)
 # ----------------------------------------------------------------------------
 COPY --from=rust-builder /build/rust-wheels/ /tmp/rust-wheels/
+COPY --from=rust-builder /build/rust-bin/ /tmp/rust-bin/
 
 # ----------------------------------------------------------------------------
 # Create and populate virtual environment
@@ -181,6 +194,11 @@ COPY mcp-catalog.yml /app/
 # Optional: Copy run.sh if it's needed in production
 COPY run.sh /app/
 
+RUN if [ -f /tmp/rust-bin/llm_gateway ]; then \
+        cp /tmp/rust-bin/llm_gateway /app/llm_gateway; \
+    fi \
+    && rm -rf /tmp/rust-bin
+
 # ----------------------------------------------------------------------------
 # Download CDN assets for airgapped deployment
 # This downloads external CSS/JS dependencies during build
@@ -194,6 +212,7 @@ RUN chmod +x /tmp/download-cdn-assets.sh \
 # Ensure executable permissions for scripts
 # ----------------------------------------------------------------------------
 RUN chmod +x /app/run-gunicorn.sh /app/run-granian.sh /app/run.sh
+RUN if [ -f /app/llm_gateway ]; then chmod +x /app/llm_gateway; fi
 
 # ----------------------------------------------------------------------------
 # Pre-compile Python bytecode with -OO optimization

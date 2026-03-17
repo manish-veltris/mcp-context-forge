@@ -1424,6 +1424,45 @@ class GatewayProvider:
         self._underlying_provider = None
         logger.info(f"Initializing Gateway provider with model: {config.model}")
 
+    @staticmethod
+    def _build_rust_gateway_headers() -> Dict[str, str]:
+        headers = {"x-forwarded-internally": "true"}
+        if settings.experimental_rust_llm_gateway_internal_secret:
+            headers["x-contextforge-internal-secret"] = settings.experimental_rust_llm_gateway_internal_secret
+        return headers
+
+    @staticmethod
+    def _build_rust_gateway_base_url() -> str:
+        base_url = settings.experimental_rust_llm_gateway_url.rstrip("/")
+        if not base_url.endswith("/v1"):
+            base_url = f"{base_url}/v1"
+        return base_url
+
+    @staticmethod
+    def _supports_rust_gateway(provider_type: str, model_type: str) -> bool:
+        if not settings.experimental_rust_llm_gateway_enabled or model_type != "chat":
+            return False
+
+        # Import locally to avoid widening import dependencies for the LangChain path.
+        # First-Party
+        from mcpgateway.services.llm_proxy_service import RUST_LLM_GATEWAY_SUPPORTED_PROVIDER_TYPES  # pylint: disable=import-outside-toplevel
+
+        return provider_type in RUST_LLM_GATEWAY_SUPPORTED_PROVIDER_TYPES
+
+    def _build_rust_gateway_llm(self, model_id: str, temperature: float, max_tokens: Optional[int]) -> BaseChatModel:
+        kwargs: Dict[str, Any] = {
+            "api_key": "internal",
+            "model": model_id,
+            "base_url": self._build_rust_gateway_base_url(),
+            "default_headers": self._build_rust_gateway_headers(),
+            "temperature": temperature,
+            "timeout": self.config.timeout,
+            "max_tokens": max_tokens,
+        }
+        self.llm = ChatOpenAI(**kwargs)
+        logger.info(f"Gateway provider created Rust-backed LLM instance for model: {model_id}")
+        return self.llm
+
     def get_llm(self, model_type: str = "chat") -> Union[BaseChatModel, Any]:
         """
         Get LLM instance by looking up model from gateway's LLM Settings.
@@ -1505,6 +1544,9 @@ class GatewayProvider:
                 "temperature": temperature,
                 "timeout": self.config.timeout,
             }
+
+            if self._supports_rust_gateway(provider_type, model_type):
+                return self._build_rust_gateway_llm(model.model_id, temperature, max_tokens)
 
             if provider_type == "openai":
                 kwargs.update(

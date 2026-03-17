@@ -5344,8 +5344,9 @@ class TestRemainingCoverageGaps:
         monkeypatch.setattr(main_mod, "SessionLocal", lambda: sess)
 
         result = main_mod.healthcheck()
-        assert result["status"] == "unhealthy"
-        assert "db down" in result["error"]
+        payload = json.loads(result.body.decode())
+        assert payload["status"] == "unhealthy"
+        assert "db down" in payload["error"]
         assert sess.closed is True
 
     async def test_readiness_check_invalidate_failure_is_best_effort(self, monkeypatch):
@@ -5367,7 +5368,10 @@ class TestRemainingCoverageGaps:
             def close(self):
                 return None
 
-        monkeypatch.setattr(main_mod, "SessionLocal", lambda: FakeSession())
+        def _session_local():
+            return FakeSession()
+
+        monkeypatch.setattr(main_mod, "SessionLocal", _session_local)
 
         async def _to_thread(func, *args, **kwargs):  # noqa: ANN001
             return func(*args, **kwargs)
@@ -5376,6 +5380,7 @@ class TestRemainingCoverageGaps:
 
         response = await main_mod.readiness_check()
         assert response.status_code == 503
+        assert response.headers["x-contextforge-llm-runtime"] in {"python", "rust"}
         payload = json.loads(response.body.decode())
         assert payload["status"] == "not ready"
 

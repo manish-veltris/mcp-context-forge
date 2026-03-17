@@ -50,6 +50,7 @@ async def test_chat_completions_streaming_disabled(monkeypatch: pytest.MonkeyPat
 @pytest.mark.asyncio
 async def test_chat_completions_success(monkeypatch: pytest.MonkeyPatch, mock_permission_service):
     monkeypatch.setattr(llm_proxy_router.settings, "llm_streaming_enabled", True)
+    monkeypatch.setattr(llm_proxy_router.settings, "experimental_rust_llm_gateway_enabled", False)
 
     request = ChatCompletionRequest(model="gpt-4", messages=[ChatMessage(role="user", content="hi")])
     response = SimpleNamespace(id="resp")
@@ -79,6 +80,7 @@ async def test_chat_completions_model_not_found(monkeypatch: pytest.MonkeyPatch)
 @pytest.mark.asyncio
 async def test_chat_completions_streaming_success(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(llm_proxy_router.settings, "llm_streaming_enabled", True)
+    monkeypatch.setattr(llm_proxy_router.settings, "experimental_rust_llm_gateway_enabled", False)
 
     request = ChatCompletionRequest(model="gpt-4", messages=[ChatMessage(role="user", content="hi")], stream=True)
 
@@ -160,7 +162,7 @@ async def test_list_models_denies_without_llm_read_permission(monkeypatch: pytes
         def get_gateway_models(self, db):
             return [GatewayModelInfo(id="m1", model_id="gpt-4", model_name="GPT", provider_id="p1", provider_name="Provider", provider_type="openai", supports_streaming=True, supports_function_calling=False, supports_vision=False)]
 
-    monkeypatch.setattr("mcpgateway.services.llm_provider_service.LLMProviderService", lambda: DummyService())
+    monkeypatch.setattr("mcpgateway.services.llm_provider_service.LLMProviderService", DummyService)
 
     with pytest.raises(HTTPException) as excinfo:
         await llm_proxy_router.list_models(db=MagicMock(), current_user=USER_CTX)
@@ -171,13 +173,14 @@ async def test_list_models_denies_without_llm_read_permission(monkeypatch: pytes
 
 @pytest.mark.asyncio
 async def test_list_models(monkeypatch: pytest.MonkeyPatch, mock_permission_service):
+    monkeypatch.setattr(llm_proxy_router.settings, "experimental_rust_llm_gateway_enabled", False)
     models = [GatewayModelInfo(id="m1", model_id="gpt-4", model_name="GPT", provider_id="p1", provider_name="Provider", provider_type="openai", supports_streaming=True, supports_function_calling=False, supports_vision=False)]
 
     class DummyService:
         def get_gateway_models(self, db):
             return models
 
-    monkeypatch.setattr("mcpgateway.services.llm_provider_service.LLMProviderService", lambda: DummyService())
+    monkeypatch.setattr("mcpgateway.services.llm_provider_service.LLMProviderService", DummyService)
 
     response = await llm_proxy_router.list_models(db=MagicMock(), current_user=USER_CTX)
 
@@ -189,13 +192,93 @@ async def test_list_models(monkeypatch: pytest.MonkeyPatch, mock_permission_serv
 
 @pytest.mark.asyncio
 async def test_list_models_empty(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(llm_proxy_router.settings, "experimental_rust_llm_gateway_enabled", False)
+
     class DummyService:
         def get_gateway_models(self, db):
             return []
 
-    monkeypatch.setattr("mcpgateway.services.llm_provider_service.LLMProviderService", lambda: DummyService())
+    monkeypatch.setattr("mcpgateway.services.llm_provider_service.LLMProviderService", DummyService)
 
     response = await llm_proxy_router.list_models(db=MagicMock(), current_user=USER_CTX)
 
     assert response["object"] == "list"
     assert response["data"] == []
+
+
+@pytest.mark.asyncio
+async def test_chat_completions_success_rust_path(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(llm_proxy_router.settings, "llm_streaming_enabled", True)
+    monkeypatch.setattr(llm_proxy_router.settings, "experimental_rust_llm_gateway_enabled", True)
+    monkeypatch.setattr(llm_proxy_router.llm_proxy_service, "supports_experimental_rust_gateway", MagicMock(return_value=True))
+
+    request = ChatCompletionRequest(model="gpt-4", messages=[ChatMessage(role="user", content="hi")])
+    response = SimpleNamespace(id="rust-resp")
+    rust_chat = AsyncMock(return_value=response)
+    python_chat = AsyncMock()
+
+    monkeypatch.setattr(llm_proxy_router.rust_llm_gateway_proxy, "chat_completion", rust_chat)
+    monkeypatch.setattr(llm_proxy_router.llm_proxy_service, "chat_completion", python_chat)
+
+    result = await llm_proxy_router.chat_completions(request, db=MagicMock(), current_user=USER_CTX)
+
+    assert result.id == "rust-resp"
+    rust_chat.assert_awaited_once()
+    python_chat.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_chat_completions_streaming_success_rust_path(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(llm_proxy_router.settings, "llm_streaming_enabled", True)
+    monkeypatch.setattr(llm_proxy_router.settings, "experimental_rust_llm_gateway_enabled", True)
+    monkeypatch.setattr(llm_proxy_router.llm_proxy_service, "supports_experimental_rust_gateway", MagicMock(return_value=True))
+
+    request = ChatCompletionRequest(model="gpt-4", messages=[ChatMessage(role="user", content="hi")], stream=True)
+
+    async def fake_stream():
+        yield "data: test\n\n"
+
+    rust_stream = AsyncMock(return_value=fake_stream())
+    python_stream = AsyncMock()
+
+    monkeypatch.setattr(llm_proxy_router.rust_llm_gateway_proxy, "prepare_chat_completion_stream", rust_stream)
+    monkeypatch.setattr(llm_proxy_router.llm_proxy_service, "chat_completion_stream", python_stream)
+
+    result = await llm_proxy_router.chat_completions(request, db=MagicMock(), current_user=USER_CTX)
+
+    assert isinstance(result, StreamingResponse)
+    rust_stream.assert_awaited_once()
+    python_stream.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_chat_completions_unsupported_rust_model_falls_back_to_python(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(llm_proxy_router.settings, "llm_streaming_enabled", True)
+    monkeypatch.setattr(llm_proxy_router.settings, "experimental_rust_llm_gateway_enabled", True)
+    monkeypatch.setattr(llm_proxy_router.llm_proxy_service, "supports_experimental_rust_gateway", MagicMock(return_value=False))
+
+    request = ChatCompletionRequest(model="bedrock-model", messages=[ChatMessage(role="user", content="hi")])
+    response = SimpleNamespace(id="python-resp")
+    rust_chat = AsyncMock()
+    python_chat = AsyncMock(return_value=response)
+
+    monkeypatch.setattr(llm_proxy_router.rust_llm_gateway_proxy, "chat_completion", rust_chat)
+    monkeypatch.setattr(llm_proxy_router.llm_proxy_service, "chat_completion", python_chat)
+
+    result = await llm_proxy_router.chat_completions(request, db=MagicMock(), current_user=USER_CTX)
+
+    assert result.id == "python-resp"
+    rust_chat.assert_not_awaited()
+    python_chat.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_list_models_rust_path(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(llm_proxy_router.settings, "experimental_rust_llm_gateway_enabled", True)
+    rust_list = AsyncMock(return_value={"object": "list", "data": [{"id": "gpt-4"}]})
+    monkeypatch.setattr(llm_proxy_router.rust_llm_gateway_proxy, "list_models", rust_list)
+
+    response = await llm_proxy_router.list_models(db=MagicMock(), current_user=USER_CTX)
+
+    assert response["data"][0]["id"] == "gpt-4"
+    rust_list.assert_awaited_once()

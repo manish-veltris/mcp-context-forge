@@ -27,6 +27,7 @@ from mcpgateway.services.llm_proxy_service import (
     LLMProxyRequestError,
     LLMProxyService,
 )
+from mcpgateway.services.rust_llm_gateway_proxy import RustLLMGatewayProxy
 from mcpgateway.services.logging_service import LoggingService
 
 # Initialize logging
@@ -38,6 +39,22 @@ llm_proxy_router = APIRouter()
 
 # Initialize service
 llm_proxy_service = LLMProxyService()
+rust_llm_gateway_proxy = RustLLMGatewayProxy()
+
+
+def _should_delegate_to_rust_gateway(db: Session, model_id: str) -> bool:
+    """Return whether the current model should be handled by the Rust sidecar.
+
+    Args:
+        db: Database session.
+        model_id: Requested model identifier.
+
+    Returns:
+        ``True`` when the model should be served by the Rust sidecar.
+    """
+    if not settings.experimental_rust_llm_gateway_enabled:
+        return False
+    return llm_proxy_service.supports_experimental_rust_gateway(db, model_id)
 
 
 @llm_proxy_router.post(
@@ -83,6 +100,19 @@ async def chat_completions(
         )
 
     try:
+        if _should_delegate_to_rust_gateway(db, request.model):
+            if request.stream:
+                stream = await rust_llm_gateway_proxy.prepare_chat_completion_stream(request)
+                return StreamingResponse(
+                    stream,
+                    media_type="text/event-stream",
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "Connection": "keep-alive",
+                        "X-Accel-Buffering": "no",
+                    },
+                )
+            return await rust_llm_gateway_proxy.chat_completion(request)
         if request.stream:
             # Return streaming response
             return StreamingResponse(
@@ -153,6 +183,9 @@ async def list_models(
     """
     # First-Party
     from mcpgateway.services.llm_provider_service import LLMProviderService
+
+    if settings.experimental_rust_llm_gateway_enabled:
+        return await rust_llm_gateway_proxy.list_models()
 
     provider_service = LLMProviderService()
     models = provider_service.get_gateway_models(db)

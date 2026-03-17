@@ -11,7 +11,7 @@ import pytest
 
 # First-Party
 from mcpgateway.db import LLMProviderType
-from mcpgateway.llm_schemas import ChatCompletionRequest, ChatMessage
+from mcpgateway.llm_schemas import ChatCompletionRequest, ChatMessage, ResolvedChatCompletionTarget
 from mcpgateway.services.llm_proxy_service import (
     LLMModelNotFoundError,
     LLMProxyRequestError,
@@ -230,6 +230,70 @@ def test_build_ollama_request_native_options(service):
     assert url.endswith("/api/chat")
     assert headers["Content-Type"] == "application/json"
     assert body["options"]["temperature"] == 0.5
+
+
+def test_resolve_chat_completion_target_openai(service):
+    db = MagicMock()
+    model = _make_model(model_id="gpt-4")
+    provider = _make_provider(provider_type=LLMProviderType.OPENAI, api_base="https://api.openai.com/v1")
+    service._resolve_model = MagicMock(return_value=(provider, model))
+
+    target = service.resolve_chat_completion_target(db, "gpt-4")
+
+    assert isinstance(target, ResolvedChatCompletionTarget)
+    assert target.runtime_kind == "openai"
+    assert target.upstream_url.endswith("/chat/completions")
+    assert target.model_id == "gpt-4"
+
+
+def test_resolve_chat_completion_target_ollama_native(service):
+    db = MagicMock()
+    model = _make_model(model_id="llama3")
+    provider = _make_provider(provider_type=LLMProviderType.OLLAMA, api_base="http://ollama.local")
+    service._resolve_model = MagicMock(return_value=(provider, model))
+
+    target = service.resolve_chat_completion_target(db, "llama3")
+
+    assert target.runtime_kind == "ollama_native"
+    assert target.upstream_url.endswith("/api/chat")
+
+
+def test_supports_experimental_rust_gateway_supported_provider(service):
+    db = MagicMock()
+    model = _make_model(model_id="gpt-4")
+    provider = _make_provider(provider_type=LLMProviderType.OPENAI_COMPATIBLE)
+    service._resolve_model = MagicMock(return_value=(provider, model))
+
+    assert service.supports_experimental_rust_gateway(db, "gpt-4") is True
+
+
+def test_supports_experimental_rust_gateway_unsupported_provider(service):
+    db = MagicMock()
+    model = _make_model(model_id="granite")
+    provider = _make_provider(provider_type=LLMProviderType.WATSONX)
+    service._resolve_model = MagicMock(return_value=(provider, model))
+
+    assert service.supports_experimental_rust_gateway(db, "granite") is False
+
+
+def test_resolve_chat_completion_target_unsupported_provider(service):
+    db = MagicMock()
+    model = _make_model(model_id="granite")
+    provider = _make_provider(provider_type=LLMProviderType.BEDROCK)
+    service._resolve_model = MagicMock(return_value=(provider, model))
+
+    with pytest.raises(LLMProxyRequestError, match="not supported by the experimental Rust LLM Gateway"):
+        service.resolve_chat_completion_target(db, "granite")
+
+
+def test_resolve_chat_completion_target_ssrf_blocked(service):
+    db = MagicMock()
+    model = _make_model(model_id="gpt-4")
+    provider = _make_provider(provider_type=LLMProviderType.OPENAI, api_base="http://169.254.169.254")
+    service._resolve_model = MagicMock(return_value=(provider, model))
+
+    with pytest.raises(LLMProxyRequestError, match="Invalid LLM provider URL"):
+        service.resolve_chat_completion_target(db, "gpt-4")
 
 
 def test_transform_anthropic_response(service):

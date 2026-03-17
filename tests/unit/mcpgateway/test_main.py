@@ -492,7 +492,8 @@ class TestHealthAndInfrastructure:
         session = DummySession()
         with patch("mcpgateway.main.SessionLocal", return_value=session):
             response = mcpgateway_main.healthcheck()
-        assert response["status"] == "unhealthy"
+        payload = json.loads(response.body.decode())
+        assert payload["status"] == "unhealthy"
         assert session.invalidate_called is True
 
     @pytest.mark.asyncio
@@ -527,7 +528,61 @@ class TestHealthAndInfrastructure:
         ):
             response = await mcpgateway_main.readiness_check()
         assert response.status_code == 503
+        assert response.headers["x-contextforge-llm-runtime"] in {"python", "rust"}
         assert session.invalidate_called is True
+
+    @pytest.mark.asyncio
+    async def test_ready_check_requires_rust_gateway_when_enabled(self, monkeypatch):
+        """Readiness should fail when the experimental Rust LLM Gateway is enabled but unavailable."""
+        # First-Party
+        from mcpgateway import main as mcpgateway_main
+
+        class DummySession:
+            def execute(self, *_args, **_kwargs):
+                return None
+
+            def commit(self):
+                return None
+
+            def rollback(self):
+                return None
+
+            def invalidate(self):
+                return None
+
+            def close(self):
+                return None
+
+        monkeypatch.setattr(mcpgateway_main.settings, "experimental_rust_llm_gateway_enabled", True)
+
+        def _session_local():
+            return DummySession()
+
+        monkeypatch.setattr(mcpgateway_main, "SessionLocal", _session_local)
+        monkeypatch.setattr(mcpgateway_main, "_check_experimental_rust_llm_gateway_health", lambda: "Experimental Rust LLM Gateway unavailable")
+
+        async def _to_thread(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        monkeypatch.setattr(mcpgateway_main.asyncio, "to_thread", _to_thread)
+
+        response = await mcpgateway_main.readiness_check()
+
+        assert response.status_code == 503
+        payload = json.loads(response.body.decode())
+        assert payload["llm_gateway_runtime"]["available"] is False
+        assert "Rust LLM Gateway unavailable" in payload["error"]
+
+    def test_health_check_reports_rust_runtime_when_enabled(self, test_client, monkeypatch):
+        monkeypatch.setattr("mcpgateway.main.settings.experimental_rust_llm_gateway_enabled", True)
+        monkeypatch.setattr("mcpgateway.main.settings.experimental_rust_llm_gateway_url", "http://127.0.0.1:8011")
+        monkeypatch.setattr("mcpgateway.main._check_experimental_rust_llm_gateway_health", lambda: None)
+
+        response = test_client.get("/health")
+
+        assert response.status_code == 200
+        assert response.headers["x-contextforge-llm-runtime"] == "rust"
+        assert response.json()["llm_gateway_runtime"]["available"] is True
 
     def test_root_redirect(self, test_client):
         """Test that root path behavior depends on UI configuration."""

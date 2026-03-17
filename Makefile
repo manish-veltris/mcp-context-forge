@@ -7869,6 +7869,8 @@ upgrade-validate:                         ## Validate fresh + upgrade DB startup
 .PHONY: rust-ensure-deps rust-install-deps rust-install-targets rust-install
 .PHONY: rust-build-all-linux rust-build-all-platforms rust-cross rust-cross-install-build
 
+RUST_LLM_GATEWAY_MANIFEST := tools_rust/llm_gateway/Cargo.toml
+
 rust-ensure-deps:                       ## Ensure Rust toolchain, maturin, and all plugins are installed
 	@if ! command -v rustup > /dev/null 2>&1; then \
 		echo "🦀 Rust not found. Installing Rust toolchain..."; \
@@ -7900,12 +7902,14 @@ rust-install: rust-ensure-deps          ## Install all Rust plugins into venv
 
 rust-build: rust-ensure-deps            ## Build Rust plugins (release)
 	@$(MAKE) -C plugins_rust build
+	@cargo build --manifest-path $(RUST_LLM_GATEWAY_MANIFEST) --release
 
 rust-dev: rust-ensure-deps              ## Build and install Rust plugins (development mode)
 	@$(MAKE) -C plugins_rust install
 
 rust-test: rust-ensure-deps             ## Run Rust plugin tests
 	@$(MAKE) -C plugins_rust test
+	@cargo test --manifest-path $(RUST_LLM_GATEWAY_MANIFEST)
 
 rust-python-test: rust-install          ## Run Python tests for Rust plugins (installs plugins first)
 	@$(MAKE) -C plugins_rust test-python
@@ -7923,6 +7927,9 @@ rust-compare: rust-ensure-deps          ## Run compare_performance.py only (skip
 
 rust-check: rust-ensure-deps            ## Run all Rust checks (format, lint, test)
 	@$(MAKE) -C plugins_rust check
+	@cargo fmt --manifest-path $(RUST_LLM_GATEWAY_MANIFEST) --check
+	@cargo check --manifest-path $(RUST_LLM_GATEWAY_MANIFEST)
+	@cargo test --manifest-path $(RUST_LLM_GATEWAY_MANIFEST)
 
 rust-doc: rust-ensure-deps              ## Build Rust documentation
 	@$(MAKE) -C plugins_rust doc
@@ -7948,6 +7955,7 @@ rust-uninstall-plugins: rust-ensure-deps ## Uninstall all Rust plugins from Pyth
 rust-clean: rust-ensure-deps            ## Clean Rust build artifacts and uninstall plugins
 	@$(MAKE) -C plugins_rust uninstall
 	@$(MAKE) -C plugins_rust clean
+	@cargo clean --manifest-path $(RUST_LLM_GATEWAY_MANIFEST)
 
 rust-verify: rust-ensure-deps           ## Verify Rust plugin installation
 	@$(MAKE) -C plugins_rust verify

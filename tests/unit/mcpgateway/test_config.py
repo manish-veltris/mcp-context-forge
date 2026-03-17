@@ -182,6 +182,8 @@ def test_settings_default_values():
         assert settings.metrics_cleanup_interval_hours == 1
         assert settings.metrics_retention_days == 7
         assert settings.metrics_rollup_late_data_hours == 1
+        assert settings.experimental_rust_llm_gateway_enabled is False
+        assert settings.experimental_rust_llm_gateway_url == "http://127.0.0.1:8011"
 
 
 def test_api_key_property():

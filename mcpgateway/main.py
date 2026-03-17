@@ -50,6 +50,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response, Streamin
 from fastapi.security import HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+import httpx
 from jinja2 import Environment, FileSystemLoader
 from jsonpath_ng.ext import parse
 from jsonpath_ng.jsonpath import JSONPath
@@ -163,6 +164,9 @@ from mcpgateway.version import router as version_router
 # Initialize logging service first
 logging_service = LoggingService()
 logger = logging_service.get_logger("mcpgateway")
+
+if settings.experimental_rust_llm_gateway_enabled:
+    logger.info(f"Experimental Rust LLM Gateway enabled at {settings.experimental_rust_llm_gateway_url}")
 
 # Share the logging service with admin module
 set_logging_service(logging_service)
@@ -7188,6 +7192,66 @@ async def reset_metrics(entity: Optional[str] = None, entity_id: Optional[int] =
 ####################
 # Healthcheck      #
 ####################
+_LLM_RUNTIME_HEADER = "x-contextforge-llm-runtime"
+_LLM_RUNTIME_URL_HEADER = "x-contextforge-llm-runtime-url"
+
+
+def _llm_runtime_headers() -> Dict[str, str]:
+    headers = {_LLM_RUNTIME_HEADER: "rust" if settings.experimental_rust_llm_gateway_enabled else "python"}
+    if settings.experimental_rust_llm_gateway_enabled:
+        headers[_LLM_RUNTIME_URL_HEADER] = settings.experimental_rust_llm_gateway_url
+    return headers
+
+
+def _check_experimental_rust_llm_gateway_health() -> Optional[str]:
+    """Check whether the experimental Rust LLM Gateway is healthy.
+
+    Returns:
+        An error message when the sidecar is unavailable or unhealthy, or
+        ``None`` when the sidecar is healthy.
+    """
+    if not settings.experimental_rust_llm_gateway_enabled:
+        return None
+
+    runtime_url = settings.experimental_rust_llm_gateway_url.rstrip("/")
+    timeout = max(1, min(settings.experimental_rust_llm_gateway_timeout_seconds, 5))
+    parsed_runtime_url = urlparse(runtime_url)
+    if parsed_runtime_url.scheme not in {"http", "https"} or not parsed_runtime_url.netloc:
+        return "Experimental Rust LLM Gateway URL must use http or https"
+
+    try:
+        response = httpx.get(
+            f"{runtime_url}/health",
+            timeout=timeout,
+            follow_redirects=False,
+        )
+        payload = response.json()
+    except httpx.HTTPError as exc:
+        return f"Experimental Rust LLM Gateway unavailable: {exc}"
+
+    if response.status_code >= 400:
+        return f"Experimental Rust LLM Gateway health check failed with status {response.status_code}"
+    if not isinstance(payload, dict) or payload.get("status") not in {"ok", "healthy", "ready"}:
+        return "Experimental Rust LLM Gateway reported an unhealthy status"
+    return None
+
+
+def _build_llm_gateway_runtime_report(check_availability: bool = False) -> Dict[str, Any]:
+    report: Dict[str, Any] = {
+        "enabled": settings.experimental_rust_llm_gateway_enabled,
+        "mode": "rust" if settings.experimental_rust_llm_gateway_enabled else "python",
+    }
+    if settings.experimental_rust_llm_gateway_enabled:
+        report["configured_url"] = settings.experimental_rust_llm_gateway_url
+        report["internal_secret_configured"] = bool(settings.experimental_rust_llm_gateway_internal_secret)
+        if check_availability:
+            error = _check_experimental_rust_llm_gateway_health()
+            report["available"] = error is None
+            if error:
+                report["error"] = error
+    return report
+
+
 @app.get("/health")
 def healthcheck():
     """
@@ -7205,7 +7269,12 @@ def healthcheck():
         db.execute(text("SELECT 1"))
         # Explicitly commit to release PgBouncer backend connection in transaction mode.
         db.commit()
-        return {"status": "healthy"}
+        runtime_report = _build_llm_gateway_runtime_report(check_availability=True)
+        if settings.experimental_rust_llm_gateway_enabled and not runtime_report.get("available", False):
+            error_message = str(runtime_report.get("error", "Experimental Rust LLM Gateway unavailable"))
+            logger.error(error_message)
+            return ORJSONResponse(content={"status": "unhealthy", "error": error_message, "llm_gateway_runtime": runtime_report}, headers=_llm_runtime_headers())
+        return ORJSONResponse(content={"status": "healthy", "llm_gateway_runtime": runtime_report}, headers=_llm_runtime_headers())
     except Exception as e:
         # Rollback, then invalidate if rollback fails (mirrors get_db cleanup).
         try:
@@ -7217,7 +7286,10 @@ def healthcheck():
                 pass  # nosec B110 - Best effort cleanup on connection failure
         error_message = f"Database connection error: {str(e)}"
         logger.error(error_message)
-        return {"status": "unhealthy", "error": error_message}
+        return ORJSONResponse(
+            content={"status": "unhealthy", "error": error_message, "llm_gateway_runtime": _build_llm_gateway_runtime_report()},
+            headers=_llm_runtime_headers(),
+        )
     finally:
         db.close()
 
@@ -7266,8 +7338,15 @@ async def readiness_check():
     if error:
         error_message = f"Readiness check failed: {error}"
         logger.error(error_message)
-        return ORJSONResponse(content={"status": "not ready", "error": error_message}, status_code=503)
-    return ORJSONResponse(content={"status": "ready"}, status_code=200)
+        return ORJSONResponse(content={"status": "not ready", "error": error_message, "llm_gateway_runtime": _build_llm_gateway_runtime_report()}, status_code=503, headers=_llm_runtime_headers())
+
+    runtime_report = await asyncio.to_thread(_build_llm_gateway_runtime_report, True)
+    if settings.experimental_rust_llm_gateway_enabled and not runtime_report.get("available", False):
+        error_message = str(runtime_report.get("error", "Experimental Rust LLM Gateway unavailable"))
+        logger.error(error_message)
+        return ORJSONResponse(content={"status": "not ready", "error": error_message, "llm_gateway_runtime": runtime_report}, status_code=503, headers=_llm_runtime_headers())
+
+    return ORJSONResponse(content={"status": "ready", "llm_gateway_runtime": runtime_report}, status_code=200, headers=_llm_runtime_headers())
 
 
 @app.get("/health/security", tags=["health"])
@@ -7873,14 +7952,16 @@ if settings.llmchat_enabled:
     # Include LLM configuration and proxy routers (internal API)
     try:
         # First-Party
+        from mcpgateway.routers.internal_llm_gateway_router import internal_llm_gateway_router
         from mcpgateway.routers.llm_admin_router import llm_admin_router
         from mcpgateway.routers.llm_config_router import llm_config_router
         from mcpgateway.routers.llm_proxy_router import llm_proxy_router
 
         app.include_router(llm_config_router, prefix="/llm", tags=["LLM Configuration"])
         app.include_router(llm_proxy_router, prefix=settings.llm_api_prefix, tags=["LLM Proxy"])
+        app.include_router(internal_llm_gateway_router, tags=["LLM Internal"])
         app.include_router(llm_admin_router, prefix="/admin/llm", tags=["LLM Admin"])
-        logger.info("LLM configuration, proxy, and admin routers included")
+        logger.info("LLM configuration, proxy, internal runtime, and admin routers included")
     except ImportError as e:
         logger.debug(f"LLM routers not available: {e}")
 

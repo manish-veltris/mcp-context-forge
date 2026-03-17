@@ -577,6 +577,23 @@ class ChatCompletionChunk(BaseModel):
     choices: List[Dict[str, Any]]
 
 
+class ResolveChatCompletionTargetRequest(BaseModel):
+    """Trusted internal request for resolving a model into a runtime target."""
+
+    model: str = Field(..., description="Model ID, alias, or UUID to resolve")
+
+
+class ResolvedChatCompletionTarget(BaseModel):
+    """Trusted internal response describing the upstream target for a chat request."""
+
+    runtime_kind: Literal["openai", "azure_openai", "anthropic", "ollama_openai", "ollama_native"] = Field(..., description="Provider/runtime mode the Rust module should execute")
+    upstream_url: str = Field(..., description="Validated upstream URL for chat completions")
+    upstream_headers: Dict[str, str] = Field(default_factory=dict, description="Headers required for the upstream provider call")
+    model_id: str = Field(..., description="Concrete provider model identifier")
+    default_temperature: Optional[float] = Field(None, description="Provider default temperature")
+    default_max_tokens: Optional[int] = Field(None, description="Provider default maximum output tokens")
+
+
 # ---------------------------------------------------------------------------
 # Embedding Schemas
 # ---------------------------------------------------------------------------

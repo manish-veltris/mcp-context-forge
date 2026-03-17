@@ -117,6 +117,8 @@ services:
     build:
       context: .
       dockerfile: Containerfile.lite     # Same one the Makefile builds
+      args:
+        ENABLE_RUST: ${ENABLE_RUST:-false}
     restart: unless-stopped
     # NOTE: When using replicas > 1, access via nginx:8080 instead of direct port 4444
     # ports:
@@ -372,6 +374,16 @@ services:
       - JSON_SCHEMA_VALIDATION_STRICT=true
       - CORRELATION_ID_ENABLED=false
       - LLMCHAT_ENABLED=true
+      # Experimental Rust LLM Gateway sidecar (same container, loopback only)
+      # Requires build arg ENABLE_RUST=true so /app/llm_gateway is present.
+      - EXPERIMENTAL_RUST_LLM_GATEWAY_ENABLED=${EXPERIMENTAL_RUST_LLM_GATEWAY_ENABLED:-false}
+      - EXPERIMENTAL_RUST_LLM_GATEWAY_URL=${EXPERIMENTAL_RUST_LLM_GATEWAY_URL:-http://127.0.0.1:8011}
+      - EXPERIMENTAL_RUST_LLM_GATEWAY_TIMEOUT_SECONDS=${EXPERIMENTAL_RUST_LLM_GATEWAY_TIMEOUT_SECONDS:-120}
+      - EXPERIMENTAL_RUST_LLM_GATEWAY_INTERNAL_SECRET=${EXPERIMENTAL_RUST_LLM_GATEWAY_INTERNAL_SECRET:-}
+      - LLM_GATEWAY_BIND=${LLM_GATEWAY_BIND:-127.0.0.1:8011}
+      - LLM_GATEWAY_REQUEST_TIMEOUT_SECONDS=${LLM_GATEWAY_REQUEST_TIMEOUT_SECONDS:-120}
+      - LLM_GATEWAY_CORE_URL=${LLM_GATEWAY_CORE_URL:-http://127.0.0.1:4444}
+      - LLM_GATEWAY_CORE_INSECURE_TLS=${LLM_GATEWAY_CORE_INSECURE_TLS:-false}
       - OBSERVABILITY_ENABLED=false
       # ═══════════════════════════════════════════════════════════════════════════
       # Database Connection Pool Configuration

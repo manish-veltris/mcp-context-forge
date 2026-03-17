@@ -353,6 +353,38 @@ def test_gateway_provider_openai(monkeypatch):
     assert llm is not None
 
 
+def test_gateway_provider_openai_chat_uses_rust_sidecar_when_enabled(monkeypatch):
+    _patch_gateway_llms(monkeypatch)
+    model, provider = _make_model_and_provider("openai", api_base="https://api")
+    _patch_gateway_session(monkeypatch, model, provider)
+    monkeypatch.setattr("mcpgateway.utils.services_auth.decode_auth", lambda _v: {"api_key": "decoded"})
+    monkeypatch.setattr(svc.settings, "experimental_rust_llm_gateway_enabled", True)
+    monkeypatch.setattr(svc.settings, "experimental_rust_llm_gateway_url", "http://127.0.0.1:8011")
+    monkeypatch.setattr(svc.settings, "experimental_rust_llm_gateway_internal_secret", "shared-secret")
+
+    gateway = svc.GatewayProvider(svc.GatewayConfig(model="gpt-4"))
+    llm = gateway.get_llm(model_type="chat")
+
+    assert llm.kwargs["api_key"] == "internal"
+    assert llm.kwargs["base_url"] == "http://127.0.0.1:8011/v1"
+    assert llm.kwargs["default_headers"]["x-forwarded-internally"] == "true"
+    assert llm.kwargs["default_headers"]["x-contextforge-internal-secret"] == "shared-secret"
+
+
+def test_gateway_provider_unsupported_provider_stays_on_python_when_rust_enabled(monkeypatch):
+    _patch_gateway_llms(monkeypatch)
+    model, provider = _make_model_and_provider("bedrock", config={"region_name": "us-east-1"})
+    _patch_gateway_session(monkeypatch, model, provider)
+    monkeypatch.setattr("mcpgateway.utils.services_auth.decode_auth", lambda _v: {"api_key": "decoded"})
+    monkeypatch.setattr(svc.settings, "experimental_rust_llm_gateway_enabled", True)
+    monkeypatch.setattr(svc.settings, "experimental_rust_llm_gateway_url", "http://127.0.0.1:8011")
+
+    gateway = svc.GatewayProvider(svc.GatewayConfig(model="gpt-4"))
+    llm = gateway.get_llm(model_type="chat")
+
+    assert llm.kwargs.get("base_url") != "http://127.0.0.1:8011/v1"
+
+
 def test_gateway_provider_openai_completion_branch(monkeypatch):
     class DummyChat:
         def __init__(self, **kwargs):

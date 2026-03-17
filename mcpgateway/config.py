@@ -757,6 +757,10 @@ class Settings(BaseSettings):
     llm_request_timeout: int = Field(default=120, description="Request timeout in seconds for LLM API calls")
     llm_streaming_enabled: bool = Field(default=True, description="Enable streaming responses for LLM Chat")
     llm_health_check_interval: int = Field(default=300, description="Provider health check interval in seconds")
+    experimental_rust_llm_gateway_enabled: bool = Field(default=False, description="Enable the experimental Rust LLM Gateway relay for OpenAI-compatible LLM proxy routes")
+    experimental_rust_llm_gateway_url: str = Field(default="http://127.0.0.1:8011", description="Base URL for the experimental Rust LLM Gateway sidecar")
+    experimental_rust_llm_gateway_timeout_seconds: int = Field(default=120, description="Timeout in seconds for Python-to-Rust experimental LLM Gateway requests")
+    experimental_rust_llm_gateway_internal_secret: Optional[str] = Field(default=None, description="Optional shared secret used on trusted Python<->Rust LLM Gateway hops")
 
     @field_validator("allowed_roots", mode="before")
     @classmethod
