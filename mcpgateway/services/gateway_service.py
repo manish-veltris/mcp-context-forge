@@ -952,10 +952,10 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
                     custom_name=tool.name,
                     custom_name_slug=slugify(tool.name),
                     display_name=generate_display_name(tool.name),
-                    url=normalized_url,
+                    url=tool.url if gateway.transport.lower() == "openapi" and tool.url else normalized_url,
                     original_description=tool.description,
                     description=tool.description,
-                    integration_type="MCP",  # Gateway-discovered tools are MCP type
+                    integration_type="REST" if gateway.transport.lower() == "openapi" else "MCP",  # OpenAPI turns into REST endpoints
                     request_type=tool.request_type,
                     headers=tool.headers,
                     input_schema=tool.input_schema,
@@ -3821,6 +3821,115 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
                 capabilities, tools, resources, prompts = await self.connect_to_streamablehttp_server(
                     url, authentication, ca_certificate, include_prompts, include_resources, auth_query_params, client_cert=client_cert, client_key=client_key
                 )
+            elif transport.lower() == "openapi":
+                # Third-Party
+                import orjson  # pylint: disable=import-outside-toplevel
+                import yaml  # pylint: disable=import-outside-toplevel
+
+                # First, fetch the OpenAPI spec
+                request_timeout = get_http_timeout(read_timeout=30.0)
+                try:
+                    response = await self._http_client.get(url, headers=authentication, timeout=request_timeout)
+                    response.raise_for_status()
+
+                    try:
+                        spec = orjson.loads(response.content)
+                    except orjson.JSONDecodeError:
+                        spec = yaml.safe_load(response.content)
+                except httpx.HTTPStatusError as e:
+                    raise GatewayConnectionError(f"HTTP error fetching OpenAPI spec: {e.response.status_code} {e.response.text}") from e
+                except Exception as e:
+                    raise GatewayConnectionError(f"Failed to fetch or parse OpenAPI spec: {str(e)}") from e
+
+                def resolve_all_refs(obj, depth=0):
+                    """Recursively resolve OpenAPI $ref pointers up to a maximum depth."""
+                    if depth > 5:
+                        return obj
+                    if isinstance(obj, dict):
+                        if "$ref" in obj:
+                            ref_path = obj["$ref"]
+                            if ref_path.startswith("#/"):
+                                parts = ref_path[2:].split("/")
+                                curr = spec
+                                for p in parts:
+                                    if isinstance(curr, dict):
+                                        curr = curr.get(p, {})
+                                return resolve_all_refs(curr, depth + 1)
+                            return obj
+                        return {k: resolve_all_refs(v, depth + 1) for k, v in obj.items()}
+                    elif isinstance(obj, list):
+                        return [resolve_all_refs(v, depth + 1) for v in obj]
+                    return obj
+
+                capabilities = {"openapi": spec.get("openapi", "3.0.0"), "info": spec.get("info", {})}
+
+                # Determine base URL for tool calls
+                servers = spec.get("servers", [])
+                if servers and isinstance(servers, list) and servers[0].get("url"):
+                    server_url = servers[0]["url"]
+                    if server_url.startswith("/"):
+                        parsed_url = urlparse(url)
+                        base_url = f"{parsed_url.scheme}://{parsed_url.netloc}{server_url}"
+                    else:
+                        base_url = server_url
+                else:
+                    base_url = url.rsplit("/", 1)[0] if url.count("/") > 2 else url
+
+                for path, path_item in spec.get("paths", {}).items():
+                    if not isinstance(path_item, dict):
+                        continue
+                    for method, operation in path_item.items():
+                        if not isinstance(operation, dict):
+                            continue
+                        if method.lower() not in ("get", "post", "put", "delete", "patch"):
+                            continue
+
+                        op_id = operation.get("operationId", f"{method.lower()}_{path.strip('/').replace('/', '_').replace('{', '').replace('}', '')}")
+                        summary = operation.get("summary", operation.get("description", ""))
+
+                        properties = {}
+                        required = []
+
+                        # Parse parameters (query, path, header)
+                        for param in operation.get("parameters", []):
+                            param = resolve_all_refs(param)
+                            name = param.get("name")
+                            if not name:
+                                continue
+
+                            if param.get("in") == "body":
+                                param_schema = param.get("schema", {})
+                                if param_schema.get("type") == "object" and "properties" in param_schema:
+                                    properties.update(param_schema.get("properties", {}))
+                                    required.extend(param_schema.get("required", []))
+                                elif "properties" in param_schema:
+                                    properties.update(param_schema.get("properties", {}))
+                                    required.extend(param_schema.get("required", []))
+                                continue
+
+                            param_schema = param.get("schema", {"type": "string"})
+                            properties[name] = {"type": param_schema.get("type", "string"), "description": param.get("description", "")}
+                            if param.get("required", False) or param.get("in") == "path":
+                                required.append(name)
+
+                        # Parse requestBody (json)
+                        req_body = resolve_all_refs(operation.get("requestBody", {}))
+                        if req_body and "content" in req_body and "application/json" in req_body["content"]:
+                            schema = req_body["content"]["application/json"].get("schema", {})
+                            if schema.get("type") == "object" and "properties" in schema:
+                                properties.update(schema.get("properties", {}))
+                                required.extend(schema.get("required", []))
+                            elif "properties" in schema:
+                                properties.update(schema.get("properties", {}))
+                                required.extend(schema.get("required", []))
+
+                        input_schema = {"type": "object", "properties": properties}
+                        if required:
+                            input_schema["required"] = required
+
+                        tool_url = f"{base_url.rstrip('/')}/{path.lstrip('/')}"
+
+                        tools.append(ToolCreate(name=op_id[:64], description=summary, integration_type="REST", request_type=method.upper(), url=tool_url, input_schema=input_schema))
 
             return capabilities, tools, resources, prompts
         except Exception as e:
@@ -4205,10 +4314,10 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
             custom_name=tool.name,
             custom_name_slug=slugify(tool.name),
             display_name=generate_display_name(tool.name),
-            url=gateway.url,
+            url=tool.url if gateway.transport.lower() == "openapi" and tool.url else gateway.url,
             original_description=tool.description,
             description=tool.description,
-            integration_type="MCP",  # Gateway-discovered tools are MCP type
+            integration_type="REST" if gateway.transport.lower() == "openapi" else "MCP",  # OpenAPI turns into REST endpoints
             request_type=tool.request_type,
             headers=tool.headers,
             input_schema=tool.input_schema,
@@ -4268,13 +4377,17 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
                     # Update existing tool if there are changes
                     fields_to_update = False
 
+                    is_openapi = gateway.transport.lower() == "openapi"
+                    expected_integration = "REST" if is_openapi else "MCP"
+                    expected_url = tool.url if is_openapi and tool.url else gateway.url
+
                     # Check basic field changes
                     # Compare against original_description (upstream value) rather than description
                     # (which may have been customized by the user)
                     basic_fields_changed = (
-                        existing_tool.url != gateway.url
+                        existing_tool.url != expected_url
                         or existing_tool.original_description != tool.description
-                        or existing_tool.integration_type != "MCP"
+                        or existing_tool.integration_type != expected_integration
                         or existing_tool.request_type != tool.request_type
                     )
 
@@ -4310,13 +4423,13 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
                     if basic_fields_changed or schema_fields_changed or auth_fields_changed:
                         fields_to_update = True
                     if fields_to_update:
-                        existing_tool.url = gateway.url
+                        existing_tool.url = expected_url
                         # Only overwrite user-facing description if it hasn't been customized
                         # (mirrors original_name/custom_name pattern)
                         if existing_tool.description == existing_tool.original_description:
                             existing_tool.description = tool.description
                         existing_tool.original_description = tool.description
-                        existing_tool.integration_type = "MCP"
+                        existing_tool.integration_type = expected_integration
                         existing_tool.request_type = tool.request_type
                         existing_tool.headers = tool.headers
                         existing_tool.input_schema = tool.input_schema

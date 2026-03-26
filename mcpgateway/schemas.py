@@ -2613,6 +2613,7 @@ class TransportType(str, Enum):
     HTTP = "HTTP"
     STDIO = "STDIO"
     STREAMABLEHTTP = "STREAMABLEHTTP"
+    OPENAPI = "OPENAPI"
 
 
 class GatewayCreate(BaseModelWithConfigDict):
