@@ -88,6 +88,7 @@ from mcpgateway.services.structured_logger import get_structured_logger
 from mcpgateway.services.team_management_service import TeamManagementService
 from mcpgateway.utils.correlation_id import get_correlation_id
 from mcpgateway.utils.create_slug import slugify
+from mcpgateway.utils.dict_utils import flatten_dict, unflatten_dict
 from mcpgateway.utils.display_name import generate_display_name
 from mcpgateway.utils.gateway_access import build_gateway_auth_headers, check_gateway_access, extract_gateway_id_from_headers
 from mcpgateway.utils.metrics_common import build_top_performers
@@ -3742,7 +3743,8 @@ class ToolService(BaseService):
                                 headers = payload.headers.model_dump()
 
                     # Build the payload based on integration type
-                    payload = arguments.copy()
+                    # Use unflatten_dict to reconstruct nested objects from dot-notation arguments
+                    payload = unflatten_dict(arguments)
 
                     # Handle URL path parameter substitution (using local variable)
                     final_url = tool_url
@@ -3839,6 +3841,13 @@ class ToolService(BaseService):
                         except orjson.JSONDecodeError:
                             result = {"response_text": response.text} if response.text else {}
                         logger.debug(f"REST API tool response: {result}")
+
+                        # Flatten the response result so it matches the flattened output_schema
+                        if isinstance(result, dict):
+                            result = flatten_dict(result)
+                        elif isinstance(result, list):
+                            result = [flatten_dict(r) if isinstance(r, dict) else r for r in result]
+
                         filtered_response = extract_using_jq(result, tool_jsonpath_filter)
                         # Check if extract_using_jq returned an error (list of TextContent objects)
                         if isinstance(filtered_response, list) and len(filtered_response) > 0 and isinstance(filtered_response[0], TextContent):

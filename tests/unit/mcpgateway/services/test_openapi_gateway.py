@@ -42,6 +42,22 @@ async def test_initialize_gateway_openapi():
                                 }
                             }
                         }
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "User created",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "id": {"type": "integer"},
+                                            "name": {"type": "string"}
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -67,6 +83,8 @@ async def test_initialize_gateway_openapi():
     assert "name" in post_tool.input_schema["properties"]
     assert "name" in post_tool.input_schema["required"]
     assert post_tool.url == "https://api.example.com/v1/users"
+    assert post_tool.output_schema["type"] == "object"
+    assert "id" in post_tool.output_schema["properties"]
 
 
 @pytest.mark.asyncio
@@ -129,7 +147,15 @@ async def test_initialize_gateway_swagger_2_0_petstore():
                                 "$ref": "#/definitions/Pet"
                             }
                         }
-                    ]
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "successful operation",
+                            "schema": {
+                                "$ref": "#/definitions/Pet"
+                            }
+                        }
+                    }
                 }
             }
         },
@@ -187,3 +213,139 @@ async def test_initialize_gateway_swagger_2_0_petstore():
     # Assert required fields were migrated
     assert "name" in post_tool.input_schema["required"]
     assert "photoUrls" in post_tool.input_schema["required"]
+
+    # Assert output_schema was parsed for Swagger 2.0
+    assert post_tool.output_schema["type"] == "object"
+    assert "name" in post_tool.output_schema["properties"]
+    assert post_tool.output_schema["properties"]["name"]["type"] == "string"
+
+
+@pytest.mark.asyncio
+async def test_initialize_gateway_openapi_nested_objects():
+    """Test that nested objects and allOf are handled correctly in the payload."""
+    service = GatewayService()
+
+    mock_response = MagicMock(spec=Response)
+    mock_response.status_code = 200
+    mock_response.raise_for_status = MagicMock()
+    mock_response.content = b"""{
+        "openapi": "3.0.0",
+        "paths": {
+            "/nested": {
+                "post": {
+                    "operationId": "postNested",
+                    "requestBody": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "user": {
+                                            "type": "object",
+                                            "properties": {
+                                                "id": {"type": "integer"},
+                                                "details": {
+                                                    "allOf": [
+                                                        {"type": "object", "properties": {"bio": {"type": "string"}}},
+                                                        {"type": "object", "properties": {"age": {"type": "integer"}}}
+                                                    ]
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }"""
+
+    service._http_client.get = AsyncMock(return_value=mock_response)
+
+    capabilities, tools, resources, prompts = await service._initialize_gateway(url="https://api.example.com/openapi.json", transport="OPENAPI")
+
+    assert len(tools) == 1
+    tool = tools[0]
+    props = tool.input_schema["properties"]
+
+    assert "user" in props
+    user_props = props["user"]["properties"]
+    assert "id" in user_props
+    assert "details" in user_props
+
+    # After merging allOf, 'details' should have flattened properties
+    details_props = user_props["details"]["properties"]
+    assert "bio" in details_props
+    assert "age" in details_props
+    assert details_props["bio"]["type"] == "string"
+    assert details_props["age"]["type"] == "integer"
+
+
+@pytest.mark.asyncio
+async def test_initialize_gateway_openapi_deep_nesting():
+    """Test deep nesting and Swagger 2.0 response schemas."""
+    service = GatewayService()
+
+    mock_response = MagicMock(spec=Response)
+    mock_response.status_code = 200
+    mock_response.raise_for_status = MagicMock()
+    mock_response.content = b"""{
+        "swagger": "2.0",
+        "paths": {
+            "/deep": {
+                "post": {
+                    "parameters": [
+                        {
+                            "in": "body",
+                            "name": "body",
+                            "schema": { "$ref": "#/definitions/Root" }
+                        }
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "OK",
+                            "schema": { "$ref": "#/definitions/Root" }
+                        }
+                    }
+                }
+            }
+        },
+        "definitions": {
+            "Root": {
+                "type": "object",
+                "properties": {
+                    "level1": { "$ref": "#/definitions/Level1" }
+                }
+            },
+            "Level1": {
+                "type": "object",
+                "properties": {
+                    "level2": { "$ref": "#/definitions/Level2" }
+                }
+            },
+            "Level2": {
+                "type": "object",
+                "properties": {
+                    "leaf": { "type": "string" }
+                }
+            }
+        }
+    }"""
+
+    service._http_client.get = AsyncMock(return_value=mock_response)
+
+    _, tools, _, _ = await service._initialize_gateway(url="https://api.example.com/swagger.json", transport="OPENAPI")
+
+    assert len(tools) == 1
+    tool = tools[0]
+
+    # Check input_schema (should be flattened)
+    assert "level1.level2.leaf" in tool.input_schema["properties"]
+    assert tool.input_schema["properties"]["level1.level2.leaf"]["type"] == "string"
+
+    # Check output_schema (should also be flattened)
+    assert tool.output_schema["type"] == "object"
+    assert "level1.level2.leaf" in tool.output_schema["properties"]
+    assert tool.output_schema["properties"]["level1.level2.leaf"]["type"] == "string"

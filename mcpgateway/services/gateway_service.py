@@ -107,6 +107,7 @@ from mcpgateway.services.oauth_manager import OAuthManager
 from mcpgateway.services.structured_logger import get_structured_logger
 from mcpgateway.services.team_management_service import TeamManagementService
 from mcpgateway.utils.create_slug import slugify
+from mcpgateway.utils.dict_utils import flatten_schema
 from mcpgateway.utils.display_name import generate_display_name
 from mcpgateway.utils.pagination import unified_paginate
 from mcpgateway.utils.passthrough_headers import get_passthrough_headers
@@ -3843,7 +3844,7 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
 
                 def resolve_all_refs(obj, depth=0):
                     """Recursively resolve OpenAPI $ref pointers up to a maximum depth."""
-                    if depth > 5:
+                    if depth > 10:  # Increased depth for complex allOf chains
                         return obj
                     if isinstance(obj, dict):
                         if "$ref" in obj:
@@ -3856,6 +3857,31 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
                                         curr = curr.get(p, {})
                                 return resolve_all_refs(curr, depth + 1)
                             return obj
+
+                        # Merge allOf if present to flatten the schema for the LLM
+                        if "allOf" in obj and isinstance(obj["allOf"], list):
+                            merged = {}
+                            for sub in obj["allOf"]:
+                                resolved_sub = resolve_all_refs(sub, depth + 1)
+                                if isinstance(resolved_sub, dict):
+                                    for k, v in resolved_sub.items():
+                                        if k == "properties":
+                                            merged.setdefault("properties", {}).update(v)
+                                        elif k == "required":
+                                            merged.setdefault("required", []).extend(v)
+                                        elif k not in merged:
+                                            merged[k] = v
+                            # Combine with top-level properties/required if they exist alongside allOf
+                            for k, v in obj.items():
+                                if k != "allOf":
+                                    if k == "properties":
+                                        merged.setdefault("properties", {}).update(v)
+                                    elif k == "required":
+                                        merged.setdefault("required", []).extend(v)
+                                    elif k not in merged:
+                                        merged[k] = resolve_all_refs(v, depth + 1)
+                            return merged
+
                         return {k: resolve_all_refs(v, depth + 1) for k, v in obj.items()}
                     elif isinstance(obj, list):
                         return [resolve_all_refs(v, depth + 1) for v in obj]
@@ -3898,30 +3924,45 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
                                 continue
 
                             if param.get("in") == "body":
-                                param_schema = param.get("schema", {})
-                                if param_schema.get("type") == "object" and "properties" in param_schema:
+                                param_schema = flatten_schema(param.get("schema", {}))
+                                if "properties" in param_schema:
                                     properties.update(param_schema.get("properties", {}))
-                                    required.extend(param_schema.get("required", []))
-                                elif "properties" in param_schema:
-                                    properties.update(param_schema.get("properties", {}))
-                                    required.extend(param_schema.get("required", []))
+                                    if "required" in param_schema:
+                                        required.extend(param_schema.get("required", []))
                                 continue
 
                             param_schema = param.get("schema", {"type": "string"})
-                            properties[name] = {"type": param_schema.get("type", "string"), "description": param.get("description", "")}
+                            # Preserve the whole schema but prioritize parameter-level description if missing in schema
+                            merged_schema = param_schema.copy()
+                            if "description" in param and not merged_schema.get("description"):
+                                merged_schema["description"] = param["description"]
+                            properties[name] = merged_schema
                             if param.get("required", False) or param.get("in") == "path":
                                 required.append(name)
-
                         # Parse requestBody (json)
                         req_body = resolve_all_refs(operation.get("requestBody", {}))
                         if req_body and "content" in req_body and "application/json" in req_body["content"]:
-                            schema = req_body["content"]["application/json"].get("schema", {})
-                            if schema.get("type") == "object" and "properties" in schema:
+                            schema = flatten_schema(req_body["content"]["application/json"].get("schema", {}))
+                            if "properties" in schema:
                                 properties.update(schema.get("properties", {}))
-                                required.extend(schema.get("required", []))
-                            elif "properties" in schema:
-                                properties.update(schema.get("properties", {}))
-                                required.extend(schema.get("required", []))
+                                if "required" in schema:
+                                    required.extend(schema.get("required", []))
+
+                        # Parse responses (json)
+                        responses = operation.get("responses", {})
+                        output_schema = None
+                        for code in ["200", "201"]:
+                            resp = resolve_all_refs(responses.get(code, {}))
+                            if "content" in resp and "application/json" in resp["content"]:
+                                output_schema = resp["content"]["application/json"].get("schema", {})
+                                # Also flatten output schema for better UI representation
+                                output_schema = flatten_schema(output_schema)
+                                break
+                            elif "schema" in resp:  # Swagger 2.0
+                                output_schema = resp.get("schema")
+                                # Also flatten output schema for better UI representation
+                                output_schema = flatten_schema(output_schema)
+                                break
 
                         input_schema = {"type": "object", "properties": properties}
                         if required:
@@ -3929,7 +3970,17 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
 
                         tool_url = f"{base_url.rstrip('/')}/{path.lstrip('/')}"
 
-                        tools.append(ToolCreate(name=op_id[:64], description=summary, integration_type="REST", request_type=method.upper(), url=tool_url, input_schema=input_schema))
+                        tools.append(
+                            ToolCreate(
+                                name=op_id[:64],
+                                description=summary,
+                                integration_type="REST",
+                                request_type=method.upper(),
+                                url=tool_url,
+                                input_schema=input_schema,
+                                output_schema=output_schema,
+                            )
+                        )
 
             return capabilities, tools, resources, prompts
         except Exception as e:
